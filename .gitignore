@@ -1,0 +1,25 @@
+# Secrets & Credentials
+.env
+*.json
+!package.json
+!tsconfig.json
+!tsconfig.*.json
+!sheet_analysis.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+*.db
+*.sqlite3
+
+# Node / Vite
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Logs
+*.log
