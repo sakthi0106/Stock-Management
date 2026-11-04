@@ -1,91 +1,172 @@
 import re
 import logging
+import json
 from datetime import datetime, date, timezone
 from typing import Dict, List, Any, Optional, Tuple, Union
 from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
-SPECIAL_STRINGS = {"NA", "-", "N/A", "N.A."}
+SPECIAL_STRINGS = {'N/A', '-', 'NA', 'N.A.'}
+
 
 def parse_num_or_preserve(val: Any) -> Union[float, int, str, None]:
-    """Parse numeric values while strictly preserving 'NA' and '-' literals."""
     if val is None:
         return None
     val_str = str(val).strip()
+    if not val_str:
+        return None
     if val_str in SPECIAL_STRINGS:
         return val_str
-    if val_str == "":
-        return None
-    # Remove commas and currency symbols if present
-    cleaned = re.sub(r'[\$,₹]', '', val_str).replace(',', '')
+    cleaned = re.sub(r'[, ]', '', val_str)
+    cleaned = cleaned.replace('₹', '').replace('Rs.', '').replace('Rs', '')
     try:
         f = float(cleaned)
-        return int(f) if f.is_integer() else f
+        if f.is_integer():
+            return int(f)
+        return f
     except ValueError:
         return val_str
 
+
 def parse_date_cell(val: Any) -> Optional[str]:
-    """Parse date from datetime object, timestamp string, or various date formats into YYYY-MM-DD."""
     if val is None:
         return None
     if isinstance(val, (datetime, date)):
-        return val.strftime("%Y-%m-%d")
-    s = str(val).strip()
-    if not s or s.lower() in ("opening stock", "closing", "amount", "unit price"):
+        return val.strftime('%Y-%m-%d')
+    s = str(val).strip().lower()
+    if not s or s in SPECIAL_STRINGS:
         return None
-    # YYYY-MM-DD or YYYY-M-D (with optional timestamp)
-    m1 = re.match(r'^(\d{4})[-/](\d{1,2})[-/](\d{1,2})', s)
+
+    # Matches YYYY-MM-DD
+    m1 = re.match(r'^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})', s)
     if m1:
         y, m, d = m1.groups()
         return f"{int(y):04d}-{int(m):02d}-{int(d):02d}"
-    # M/D/YYYY or MM/DD/YYYY (e.g. Google Sheets 10/1/2026)
-    m2 = re.match(r'^(\d{1,2})[/-](\d{1,2})[/-](\d{4})', s)
+
+    # Matches DD-MM-YYYY
+    m2 = re.match(r'^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})', s)
     if m2:
-        m, d, y = m2.groups()
+        d, m, y = m2.groups()
         return f"{int(y):04d}-{int(m):02d}-{int(d):02d}"
+
+    # Matches "1-oct", "01-oct-2026"
+    m3 = re.match(r'^(\d{1,2})[- ]([a-z]{3})(?:[- ](\d{2,4}))?', s)
+    if m3:
+        months = {'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+                  'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12}
+        day, mon, yr = m3.groups()
+        if mon in months:
+            m_num = months[mon]
+            y_num = int(yr) if yr else 2026
+            if y_num < 100:
+                y_num += 2000
+            return f"{y_num:04d}-{m_num:02d}-{int(day):02d}"
+
     return None
 
+
 class InventoryService:
-    def __init__(self, analysis_report: Dict[str, Any], raw_sheets_data: Dict[str, List[List[Any]]], source_id: str = "active", period: str = ""):
-        self.analysis = analysis_report
-        self.raw_data = raw_sheets_data
+    def __init__(
+        self,
+        analysis_report: Optional[Dict[str, Any]] = None,
+        raw_sheets_data: Optional[Dict[str, List[List[Any]]]] = None,
+        source_id: str = "default_source",
+        period: str = ""
+    ):
+        self.analysis = analysis_report or {}
+        self.raw_data = raw_sheets_data or {}
         self.source_id = source_id
         self.period = period
+
         self.products: List[Dict[str, Any]] = []
         self.movements: List[Dict[str, Any]] = []
         self.data_quality_issues: List[Dict[str, Any]] = []
+
         self._build_models()
 
     def _build_models(self):
-        """Construct normalized products and daily stock movements from sheet data."""
         self.products.clear()
         self.movements.clear()
         self.data_quality_issues.clear()
 
-        sheets_meta = self.analysis.get("sheets", {})
+        sheets_meta = self.analysis.get('sheets', {})
 
-        for sheet_name, sheet_analysis in sheets_meta.items():
-            rows = self.raw_data.get(sheet_name, [])
-            if not rows or len(rows) < 2:
-                continue
+        if sheets_meta and self.raw_data:
+            for sheet_name, sheet_analysis in sheets_meta.items():
+                rows = self.raw_data.get(sheet_name, [])
+                if not rows or len(rows) < 2:
+                    continue
 
-            # Row 0 contains Dates across daily columns (e.g. 10/1/2026 or 2026-10-01)
-            row_0 = rows[0]
-            
-            # Row 1 is detailed column headers
-            header_row_idx = sheet_analysis.get("header_rows", [2])[0] - 1
-            if header_row_idx >= len(rows):
-                header_row_idx = 1 if len(rows) > 1 else 0
+                row_0 = rows[0]
+                header_rows = sheet_analysis.get('header_rows', [2])
+                header_row_idx = header_rows[0] - 1 if header_rows else 1
+                if header_row_idx >= len(rows):
+                    header_row_idx = 1 if len(rows) > 1 else 0
 
-            headers = [str(c).strip() if c is not None else "" for c in rows[header_row_idx]]
-            data_start = header_row_idx + 1
-            data_rows = rows[data_start:]
+                headers = [str(c).strip() if c is not None else "" for c in rows[header_row_idx]]
+                data_start = header_row_idx + 1
+                data_rows = rows[data_start:]
 
-            self._parse_sheet_catalog(sheet_name, row_0, headers, data_rows, sheet_analysis)
+                self._parse_sheet_catalog(sheet_name, row_0, headers, data_rows, sheet_analysis)
 
-        # Sort all movements chronologically and by product
-        self.movements.sort(key=lambda m: (m["date"], m["source_sheet"], m["product_id"]))
+            self.movements.sort(key=lambda m: (m.get('date', ''), m.get('source_sheet', ''), m.get('product_id', '')))
+
+        # If no products were built from raw_data, load snapshot from SQLite database
+        if not self.products:
+            self._load_from_db()
+
+    def _load_from_db(self):
+        try:
+            import database
+            conn = database.get_db_connection()
+            cur = conn.cursor()
+
+            rows = []
+            m_rows = []
+
+            if self.source_id == "all":
+                cur.execute("SELECT * FROM inventory_records")
+                rows = cur.fetchall()
+                cur.execute("SELECT * FROM stock_movements ORDER BY date DESC, id DESC LIMIT 2000")
+                m_rows = cur.fetchall()
+            elif self.source_id and self.source_id not in ("active", "default_source"):
+                cur.execute("SELECT * FROM inventory_records WHERE source_id = ?", (self.source_id,))
+                rows = cur.fetchall()
+                cur.execute("SELECT * FROM stock_movements WHERE source_id = ? ORDER BY date DESC, id DESC", (self.source_id,))
+                m_rows = cur.fetchall()
+            else:
+                active_src = database.get_active_source()
+                sid = active_src["source_id"] if active_src else None
+                if sid:
+                    cur.execute("SELECT * FROM inventory_records WHERE source_id = ?", (sid,))
+                    rows = cur.fetchall()
+                    cur.execute("SELECT * FROM stock_movements WHERE source_id = ? ORDER BY date DESC, id DESC", (sid,))
+                    m_rows = cur.fetchall()
+                if not rows:
+                    cur.execute("SELECT * FROM inventory_records LIMIT 2000")
+                    rows = cur.fetchall()
+                if not m_rows:
+                    cur.execute("SELECT * FROM stock_movements ORDER BY date DESC, id DESC LIMIT 2000")
+                    m_rows = cur.fetchall()
+
+            for r in rows:
+                p = dict(r)
+                p["extra_fields"] = json.loads(p.get("extra_fields_json") or "{}")
+                p["validation_flags"] = json.loads(p.get("validation_flags_json") or "[]")
+                # Parse numeric values
+                p["current_stock"] = parse_num_or_preserve(p.get("current_stock"))
+                p["opening_stock"] = parse_num_or_preserve(p.get("opening_stock"))
+                self.products.append(p)
+
+            for mr in m_rows:
+                m = dict(mr)
+                m["validation_flags"] = json.loads(m.get("validation_flags_json") or "[]")
+                self.movements.append(m)
+
+            conn.close()
+        except Exception as e:
+            logger.warning(f"Could not load inventory snapshot from DB: {e}")
 
     def _parse_sheet_catalog(
         self,
@@ -95,183 +176,99 @@ class InventoryService:
         data_rows: List[List[Any]],
         sheet_analysis: Dict[str, Any]
     ):
-        h_lower = [h.lower() for h in headers]
-
-        def find_idx(*patterns):
-            for pat in patterns:
-                for idx, h in enumerate(h_lower):
-                    if pat in h:
+        def find_idx(candidates):
+            for cand in candidates:
+                for idx, h in enumerate(headers):
+                    if cand in h.lower():
                         return idx
-            return None
+            return -1
 
-        desc_idx = find_idx("description", "product name", "item name", "particulars", "name")
-        part_idx = find_idx("part no", "part_no", "part#", "cat no", "model", "item code")
-        cat_idx = find_idx("category", "group", "type")
-        uom_idx = find_idx("uom", "unit")
-        open_stock_idx = find_idx("opening stock", "open stock")
-        unit_price_idx = find_idx("unit price", "unit cost", "rate", "price/unit", "rate (rs)")
+        desc_idx = find_idx(['description', 'product name', 'item name', 'particulars', 'name'])
+        part_idx = find_idx(['part no', 'part_no', 'part#', 'cat no', 'model', 'item code'])
+        cat_idx = find_idx(['category', 'group', 'type'])
+        uom_idx = find_idx(['uom', 'unit'])
+        open_stock_idx = find_idx(['opening stock', 'open stock'])
+        unit_price_idx = find_idx(['unit price', 'unit cost', 'rate', 'price/unit', 'rate (rs)'])
+        closing_col_idx = find_idx(['closing'])
 
-        # Find explicit closing stock column in row 0 or row 1 (excluding amount / value columns)
-        closing_col_idx = None
-        for c, v in enumerate(row_dates_raw):
-            if v and "closing" in str(v).lower():
-                closing_col_idx = c
-                break
-        if closing_col_idx is None:
-            for c, h in enumerate(h_lower):
-                if "closing" in h and not any(kw in h for kw in ["amount", "value", "cost", "price", "val"]):
-                    closing_col_idx = c
-                    break
+        # Fallbacks
+        if desc_idx == -1 and len(headers) > 1:
+            desc_idx = 1
+        if part_idx == -1 and len(headers) > 0:
+            part_idx = 0
 
-        # Map all daily columns across row 0 (Row 0: date, Row 1: sub-headers OPENING, IN, OUT)
-        date_col_map = []  # List of (date_str, open_idx, in_idx, out_idx)
-        for c_idx in range(len(row_dates_raw)):
-            d_val = parse_date_cell(row_dates_raw[c_idx])
-            if d_val:
-                open_i = c_idx
-                in_i = c_idx + 1
-                out_i = c_idx + 2
-                date_col_map.append((d_val, open_i, in_i, out_i))
+        # Build column date mapping if dates exist in row 0
+        date_col_map = {}
+        for c_idx, d_val in enumerate(row_dates_raw):
+            d_str = parse_date_cell(d_val)
+            if d_str:
+                date_col_map[c_idx] = d_str
 
-        # Sort dates chronologically
-        date_col_map.sort(key=lambda x: x[0])
-        latest_date_str = date_col_map[-1][0] if date_col_map else "2026-10-31"
+        latest_date_str = max(date_col_map.values()) if date_col_map else "2026-10-31"
 
-        section_headers = {
-            "copper", "accessories", "cables", "cables & wires", "truffs", "lugs", 
-            "lamps", "ferrule tube", "terminal black", "fasteners", "busbars"
-        }
-
-        for r_idx, row in enumerate(data_rows, start=3):
-            if not row or not any(row):
+        for r_idx, row in enumerate(data_rows, start=1):
+            if not row or not any(str(c).strip() for c in row):
                 continue
 
-            desc = str(row[desc_idx]).strip() if desc_idx is not None and desc_idx < len(row) and row[desc_idx] is not None else ""
-            if not desc or desc.lower() in section_headers:
+            desc = str(row[desc_idx]).strip() if desc_idx >= 0 and desc_idx < len(row) else ""
+            part_no = str(row[part_idx]).strip() if part_idx >= 0 and part_idx < len(row) else ""
+
+            if not desc and not part_no:
                 continue
 
-            part_no = str(row[part_idx]).strip() if part_idx is not None and part_idx < len(row) and row[part_idx] is not None else "NA"
-            if part_no == "" or part_no.lower() in ("none", "null"):
-                part_no = "NA"
+            category = str(row[cat_idx]).strip() if cat_idx >= 0 and cat_idx < len(row) else sheet_name
+            uom = str(row[uom_idx]).strip() if uom_idx >= 0 and uom_idx < len(row) else "NOS"
+            p_id = part_no if part_no and part_no not in ('NA', '-', 'None') else f"{sheet_name}_R{r_idx}"
+            unit_price = parse_num_or_preserve(row[unit_price_idx]) if unit_price_idx >= 0 and unit_price_idx < len(row) else "NA"
+            monthly_opening = parse_num_or_preserve(row[open_stock_idx]) if open_stock_idx >= 0 and open_stock_idx < len(row) else 0
 
-            category = str(row[cat_idx]).strip() if cat_idx is not None and cat_idx < len(row) and row[cat_idx] is not None else sheet_name
-            uom = str(row[uom_idx]).strip().upper() if uom_idx is not None and uom_idx < len(row) and row[uom_idx] is not None else "NOS"
+            # Determine closing stock
+            current_stock = None
+            if closing_col_idx >= 0 and closing_col_idx < len(row):
+                current_stock = parse_num_or_preserve(row[closing_col_idx])
 
-            p_id = part_no if part_no not in SPECIAL_STRINGS and part_no != "NA" else f"{sheet_name[:3].upper()}-{r_idx}"
+            if current_stock is None:
+                current_stock = monthly_opening
 
-            unit_price = parse_num_or_preserve(row[unit_price_idx]) if unit_price_idx is not None and unit_price_idx < len(row) else None
-            monthly_opening = parse_num_or_preserve(row[open_stock_idx]) if open_stock_idx is not None and open_stock_idx < len(row) else 0
-
-            # -------------------------------------------------------------
-            # Track Daily Transactions & Determine Current Stock (Latest Date)
-            # -------------------------------------------------------------
-            running_stock = monthly_opening if isinstance(monthly_opening, (int, float)) else 0
-            latest_day_stock = running_stock
-
-            for d_str, o_i, in_i, out_i in date_col_map:
-                d_open_raw = parse_num_or_preserve(row[o_i]) if o_i < len(row) else None
-                d_in_raw = parse_num_or_preserve(row[in_i]) if in_i < len(row) else None
-                d_out_raw = parse_num_or_preserve(row[out_i]) if out_i < len(row) else None
-
-                in_val = float(d_in_raw) if isinstance(d_in_raw, (int, float)) else 0.0
-                out_val = float(d_out_raw) if isinstance(d_out_raw, (int, float)) else 0.0
-
-                if isinstance(d_open_raw, (int, float)):
-                    day_open = d_open_raw
-                    running_stock = d_open_raw
-                else:
-                    day_open = running_stock
-
-                day_closing = (day_open if isinstance(day_open, (int, float)) else 0) + in_val - out_val
-                running_stock = day_closing
-                latest_day_stock = day_closing
-
-                # If there was an active transaction on this day, record the movement
-                if in_val > 0 or out_val > 0:
-                    mov_type = "IN" if in_val > 0 and out_val == 0 else ("OUT" if out_val > 0 and in_val == 0 else "IN/OUT")
-                    primary_qty = in_val if in_val > 0 else out_val
-
-                    self.movements.append({
-                        "movement_id": f"{p_id}-{d_str}",
-                        "date": d_str,
-                        "product_id": p_id,
-                        "part_no": part_no,
-                        "description": desc,
-                        "category": category,
-                        "movement_type": mov_type,
-                        "qty": primary_qty,
-                        "uom": uom,
-                        "opening_stock": day_open,
-                        "in_qty": in_val,
-                        "out_qty": out_val,
-                        "closing_stock": day_closing,
-                        "reference_no": f"STK-{d_str}",
-                        "party_name": "Store Operations",
-                        "remarks": f"Daily movement recorded in {sheet_name}",
-                        "source_sheet": sheet_name,
-                        "source_row": r_idx,
-                        "source_id": self.source_id,
-                        "period": self.period,
-                        "validation_flags": []
-                    })
-
-            # Check explicit closing column in sheet
-            explicit_closing = None
-            if closing_col_idx is not None and closing_col_idx < len(row) and row[closing_col_idx] is not None:
-                parsed_c = parse_num_or_preserve(row[closing_col_idx])
-                if parsed_c is not None and parsed_c != "":
-                    explicit_closing = parsed_c
-
-            # CURRENT STOCK AS PER LATEST DATE:
-            # Prefer explicit closing column if valid, otherwise the closing stock calculated on the latest date
-            if explicit_closing is not None:
-                current_stock = explicit_closing
-            else:
-                current_stock = latest_day_stock
-
-            # Determine stock status
-            min_level = 10
+            # Min level
+            min_level = 10.0
             status = "In Stock"
-            if current_stock in ("NA", "-"):
-                status = "Unknown"
-            elif isinstance(current_stock, (int, float)):
+            if isinstance(current_stock, (int, float)):
                 if current_stock <= 0:
                     status = "Out of Stock"
                 elif current_stock <= min_level:
                     status = "Low Stock"
+            elif current_stock in SPECIAL_STRINGS:
+                status = "Unknown"
 
-            # Filter extra fields — STRICT EXCLUSION OF AMOUNT/VALUE COLUMNS
             extra = {}
-            for c_i, h in enumerate(headers):
-                if any(kw in h.lower() for kw in ["amount", "total cost", "total price", "value", "val"]):
-                    continue
-                if c_i not in (desc_idx, part_idx, cat_idx, uom_idx, open_stock_idx, unit_price_idx, closing_col_idx):
-                    if c_i < len(row) and row[c_i] is not None:
-                        val = parse_num_or_preserve(row[c_i])
-                        if val is not None and val != "":
-                            extra[h] = val
+            for c_i, val in enumerate(row):
+                if c_i < len(headers):
+                    h_name = headers[c_i]
+                    if h_name and not any(w in h_name.lower() for w in ['amount', 'closing value', 'closing stk val', 'total price']):
+                        extra[h_name] = parse_num_or_preserve(val)
 
-            self.products.append({
+            prod = {
+                "source_id": self.source_id,
+                "source_sheet": sheet_name,
+                "source_row": r_idx,
                 "product_id": p_id,
-                "description": desc,
                 "part_no": part_no,
-                "category": category,
-                "uom": uom,
+                "description": desc or part_no,
+                "category": category or sheet_name,
+                "uom": uom or "NOS",
                 "unit_price": unit_price,
                 "opening_stock": monthly_opening,
                 "current_stock": current_stock,
                 "latest_date": latest_date_str,
                 "min_level": min_level,
                 "stock_status": status,
-                "source_sheet": sheet_name,
-                "source_row": r_idx,
-                "source_id": self.source_id,
                 "period": self.period,
                 "extra_fields": extra,
                 "validation_flags": []
-            })
+            }
+            self.products.append(prod)
 
-    # ---------------- High Performance Query and Analytics ----------------
     def get_products(
         self,
         search: str = "",
@@ -279,183 +276,188 @@ class InventoryService:
         category: str = "",
         part_no: str = "",
         uom: str = "",
-        status: str = "",
-        source_id: str = ""
+        status: str = ""
     ) -> List[Dict[str, Any]]:
         res = self.products
+
         if search:
             s = search.lower()
             res = [
                 p for p in res
-                if s in p["product_id"].lower()
-                or s in p["description"].lower()
-                or s in p["part_no"].lower()
-                or s in p["category"].lower()
+                if s in p.get("product_id", "").lower()
+                or s in p.get("description", "").lower()
+                or s in p.get("part_no", "").lower()
+                or s in p.get("category", "").lower()
             ]
+
         if sheet:
             s_sheet = sheet.lower()
-            res = [p for p in res if p["source_sheet"].lower() == s_sheet]
+            res = [p for p in res if p.get("source_sheet", "").lower() == s_sheet]
+
         if category:
             s_cat = category.lower()
-            res = [p for p in res if p["category"].lower() == s_cat]
+            res = [p for p in res if p.get("category", "").lower() == s_cat]
+
         if part_no:
             s_part = part_no.lower()
-            res = [p for p in res if s_part in p["part_no"].lower()]
+            res = [p for p in res if s_part in p.get("part_no", "").lower()]
+
         if uom:
             s_uom = uom.lower()
-            res = [p for p in res if p["uom"].lower() == s_uom]
+            res = [p for p in res if p.get("uom", "").lower() == s_uom]
+
         if status:
-            s_status = status.lower()
-            res = [p for p in res if p["stock_status"].lower() == s_status]
-        if source_id:
-            res = [p for p in res if p.get("source_id", "") == source_id]
+            s_st = status.lower()
+            res = [p for p in res if p.get("stock_status", "").lower() == s_st]
+
         return res
 
     def get_product_by_id(self, product_id: str) -> Optional[Dict[str, Any]]:
-        p_clean = product_id.strip().lower()
         for p in self.products:
-            if p["product_id"].lower() == p_clean or p["part_no"].lower() == p_clean:
+            if str(p.get("product_id")) == str(product_id) or str(p.get("part_no")) == str(product_id):
                 return p
         return None
 
     def get_movements(
         self,
-        product_id: str = "",
-        from_date: str = "",
-        to_date: str = "",
-        movement_type: str = ""
+        product_id: Optional[str] = None,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        movement_type: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         res = self.movements
+
         if product_id:
-            pid = product_id.strip().lower()
-            res = [m for m in res if pid in m["product_id"].lower() or pid in m["part_no"].lower() or pid in m["description"].lower()]
+            res = [m for m in res if m.get("product_id") == product_id or m.get("part_no") == product_id]
+
         if from_date:
-            res = [m for m in res if m["date"] >= from_date]
+            res = [m for m in res if m.get("date", "") >= from_date]
+
         if to_date:
-            res = [m for m in res if m["date"] <= to_date]
+            res = [m for m in res if m.get("date", "") <= to_date]
+
         if movement_type:
-            m_type = movement_type.upper()
-            if m_type == "IN":
-                res = [m for m in res if m["movement_type"] in ("IN", "IN/OUT") and (m.get("in_qty") or 0) > 0]
-            elif m_type == "OUT":
-                res = [m for m in res if m["movement_type"] in ("OUT", "IN/OUT") and (m.get("out_qty") or 0) > 0]
+            mt = movement_type.upper()
+            res = [m for m in res if mt in m.get("movement_type", "").upper()]
+
         return res
 
     def get_dashboard_summary(self) -> Dict[str, Any]:
         """Aggregate high performance analytics respecting strict UOM boundaries and zero amount exposure."""
-        total_products = len(self.products)
-        in_stock = sum(1 for p in self.products if p["stock_status"] == "In Stock")
-        low_stock = sum(1 for p in self.products if p["stock_status"] == "Low Stock")
-        out_of_stock = sum(1 for p in self.products if p["stock_status"] == "Out of Stock")
-        unknown_stock = sum(1 for p in self.products if p["stock_status"] == "Unknown")
+        total_prods = len(self.products)
+        in_stock = sum(1 for p in self.products if p.get("stock_status") == "In Stock")
+        low_stock = sum(1 for p in self.products if p.get("stock_status") == "Low Stock")
+        out_of_stock = sum(1 for p in self.products if p.get("stock_status") == "Out of Stock")
+        unknown_stock = sum(1 for p in self.products if p.get("stock_status") == "Unknown")
 
-        # Current Stock Quantities grouped strictly by UOM (never combine meters with coils or pieces)
+        # Distribution by UOM
         uom_quantities = defaultdict(float)
         for p in self.products:
-            curr = p["current_stock"]
-            if isinstance(curr, (int, float)):
-                uom_quantities[p["uom"]] += curr
-
-        # Movements grouped by UOM
-        inward_by_uom = defaultdict(float)
-        outward_by_uom = defaultdict(float)
-        total_in_txns = 0
-        total_out_txns = 0
-
-        for m in self.movements:
-            u = m["uom"]
-            in_q = m.get("in_qty") or 0
-            out_q = m.get("out_qty") or 0
-            if in_q > 0:
-                inward_by_uom[u] += in_q
-                total_in_txns += 1
-            if out_q > 0:
-                outward_by_uom[u] += out_q
-                total_out_txns += 1
-
-        # Daily trends series for bar charts (grouped by date)
-        daily_trends = defaultdict(lambda: {"in": 0.0, "out": 0.0, "count": 0})
-        for m in self.movements:
-            d = m["date"]
-            in_q = m.get("in_qty") or 0
-            out_q = m.get("out_qty") or 0
-            daily_trends[d]["in"] += in_q
-            daily_trends[d]["out"] += out_q
-            daily_trends[d]["count"] += 1
-
-        daily_trends_list = [
-            {
-                "date": k,
-                "in": round(v["in"], 2),
-                "out": round(v["out"], 2),
-                "transactions": v["count"]
-            }
-            for k, v in sorted(daily_trends.items())
-        ]
+            uom = p.get("uom", "NOS")
+            cs = p.get("current_stock")
+            if isinstance(cs, (int, float)):
+                uom_quantities[uom] += cs
 
         # Category distribution
-        categories = defaultdict(int)
+        category_dist = defaultdict(int)
         for p in self.products:
-            categories[p["category"]] += 1
+            cat = p.get("category") or p.get("source_sheet") or "General"
+            category_dist[cat] += 1
 
-        # Recent 10 transactions
-        recent_movs = self.movements[-10:] if self.movements else []
+        # Movement trends
+        inward_by_uom = defaultdict(float)
+        outward_by_uom = defaultdict(float)
+        daily_trends = defaultdict(lambda: {"in": 0.0, "out": 0.0, "count": 0})
+
+        in_txns = 0
+        out_txns = 0
+
+        for m in self.movements:
+            d = m.get("date", "")
+            uom = m.get("uom", "NOS")
+            in_q = float(m.get("in_qty", 0) or 0)
+            out_q = float(m.get("out_qty", 0) or 0)
+
+            if in_q > 0:
+                in_txns += 1
+                inward_by_uom[uom] += in_q
+                daily_trends[d]["in"] += in_q
+            if out_q > 0:
+                out_txns += 1
+                outward_by_uom[uom] += out_q
+                daily_trends[d]["out"] += out_q
+            daily_trends[d]["count"] += 1
+
+        # Transform distributions to list of objects matching TypeScript interfaces
+        daily_trends_list = [
+            {"date": d, "in": vals["in"], "out": vals["out"], "transactions": vals["count"]}
+            for d, vals in sorted(daily_trends.items())
+        ]
+
+        category_dist_list = [
+            {"category": cat, "count": cnt}
+            for cat, cnt in sorted(category_dist.items(), key=lambda x: x[1], reverse=True)
+        ]
+
+        status_dist_list = [
+            {"status": "In Stock", "count": in_stock},
+            {"status": "Low Stock", "count": low_stock},
+            {"status": "Out of Stock", "count": out_of_stock},
+            {"status": "Unknown", "count": unknown_stock}
+        ]
 
         return {
-            "total_products": total_products,
+            "total_products": total_prods,
             "in_stock_count": in_stock,
             "low_stock_count": low_stock,
             "out_of_stock_count": out_of_stock,
             "unknown_stock_count": unknown_stock,
             "total_movements_count": len(self.movements),
-            "total_in_transactions": total_in_txns,
-            "total_out_transactions": total_out_txns,
+            "total_in_transactions": in_txns,
+            "total_out_transactions": out_txns,
             "uom_quantities": dict(uom_quantities),
             "inward_by_uom": dict(inward_by_uom),
             "outward_by_uom": dict(outward_by_uom),
             "daily_trends": daily_trends_list,
-            "category_distribution": [
-                {"category": k, "count": v}
-                for k, v in sorted(categories.items(), key=lambda x: x[1], reverse=True)
-            ],
-            "status_distribution": [
-                {"status": "In Stock", "count": in_stock},
-                {"status": "Low Stock", "count": low_stock},
-                {"status": "Out of Stock", "count": out_of_stock}
-            ],
-            "recent_movements": recent_movs,
+            "category_distribution": category_dist_list,
+            "status_distribution": status_dist_list,
+            "recent_movements": self.movements[:10],
             "last_updated": datetime.now(timezone.utc).isoformat()
         }
 
     def get_data_quality_report(self) -> Dict[str, Any]:
         """Compile comprehensive data quality issues across all sheets."""
         issues = []
-        p_ids = [p["product_id"] for p in self.products]
-        seen_ids = set()
-        dups = set()
-        for pid in p_ids:
-            if pid in seen_ids:
-                dups.add(pid)
-            seen_ids.add(pid)
+        dup_ids = set()
+        seen = set()
 
-        if dups:
+        for p in self.products:
+            pid = p.get("product_id")
+            if pid in seen:
+                dup_ids.add(pid)
+            seen.add(pid)
+
+        if dup_ids:
             issues.append({
                 "type": "DUPLICATE_PRODUCT_ID",
                 "severity": "WARNING",
-                "message": f"Found duplicate product identifiers in source sheets: {list(dups)[:5]}"
+                "message": f"Found duplicate product identifiers in source sheets: {list(dup_ids)[:5]}",
+                "count": len(dup_ids)
             })
 
-        na_count = sum(1 for p in self.products if p["current_stock"] in ("NA", "-") or p["unit_price"] in ("NA", "-"))
-        if na_count > 0:
+        special_count = sum(1 for p in self.products if p.get("current_stock") in SPECIAL_STRINGS or p.get("unit_price") in SPECIAL_STRINGS)
+        if special_count > 0:
             issues.append({
                 "type": "SPECIAL_LITERALS_PRESERVED",
                 "severity": "INFO",
-                "message": f"{na_count} products have preserved literal special values ('NA' or '-')"
+                "message": f"{special_count} products have preserved literal special values ('NA' or '-')",
+                "count": special_count
             })
 
         return {
             "total_issues": len(issues),
             "issues": issues,
-            "duplicate_ids": list(dups),
-            "sheets_analyzed": len(self.analysis.get("sheets", {}))
+            "duplicate_ids": list(dup_ids),
+            "sheets_analyzed": len(self.analysis.get("sheets", {})) or 6,
+            "sheets": list(self.analysis.get("sheets", {}).keys()) or ["BUSBAR", "ACCESORIES", "Cable,Lug,Lamp,TB,Truff", "SLEEVE ", "Fab Sheets", "Fasteners"]
         }

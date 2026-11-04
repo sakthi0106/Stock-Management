@@ -1,6 +1,6 @@
 import { Product, Movement, SyncStatus, DashboardKPI, DataQualityReport, InventoryFilters, SpreadsheetSource, SheetInfo } from '../types';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:5050/api';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
 
 class ApiClient {
   private async request<T>(endpoint: string, options?: RequestInit): Promise<T> {

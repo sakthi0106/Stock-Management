@@ -8,10 +8,12 @@ from config import Config
 
 logger = logging.getLogger(__name__)
 
-def get_db_connection():
-    conn = sqlite3.connect(Config.DATABASE_PATH, timeout=20.0)
+
+def get_db_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(Config.DATABASE_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
 
 def extract_spreadsheet_id(input_str: str) -> str:
     """Extract clean Google Spreadsheet ID from raw ID, full Google Sheets URL, or local file."""
@@ -23,16 +25,19 @@ def extract_spreadsheet_id(input_str: str) -> str:
     match = re.search(r'/spreadsheets/d/([a-zA-Z0-9-_]+)', cleaned)
     if match:
         return match.group(1)
-    if "/" not in cleaned and "\\" not in cleaned and len(cleaned) > 10:
-        return cleaned
+    if "/" in cleaned or "\\" in cleaned:
+        parts = re.split(r'[/\\]', cleaned)
+        for part in reversed(parts):
+            if len(part) >= 20 and re.match(r'^[a-zA-Z0-9-_]+$', part):
+                return part
     return cleaned
+
 
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # 1. Registered Spreadsheet Sources
-    cursor.execute('''
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS spreadsheet_sources (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source_id TEXT UNIQUE NOT NULL,
@@ -50,10 +55,9 @@ def init_db():
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
-    ''')
+    """)
 
-    # 2. Discovered Sheets per Spreadsheet Source
-    cursor.execute('''
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS spreadsheet_sheets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source_id TEXT NOT NULL,
@@ -67,10 +71,9 @@ def init_db():
             issues_json TEXT DEFAULT '[]',
             UNIQUE(source_id, sheet_name)
         )
-    ''')
+    """)
 
-    # 3. Independent Column Mappings per Worksheet
-    cursor.execute('''
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS sheet_column_mappings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source_id TEXT NOT NULL,
@@ -88,10 +91,9 @@ def init_db():
             updated_at TEXT NOT NULL,
             UNIQUE(source_id, sheet_name)
         )
-    ''')
+    """)
 
-    # 4. Synchronization History / Runs
-    cursor.execute('''
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS sync_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source_id TEXT NOT NULL,
@@ -105,10 +107,9 @@ def init_db():
             duration_ms INTEGER DEFAULT 0,
             error_message TEXT
         )
-    ''')
+    """)
 
-    # Legacy support table alias
-    cursor.execute('''
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS sync_runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp TEXT NOT NULL,
@@ -119,10 +120,9 @@ def init_db():
             fingerprint TEXT,
             error_message TEXT
         )
-    ''')
+    """)
 
-    # 5. Normalized Inventory Records (Google Sheets remains source of truth)
-    cursor.execute('''
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS inventory_records (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source_id TEXT NOT NULL,
@@ -145,10 +145,9 @@ def init_db():
             updated_at TEXT NOT NULL,
             UNIQUE(source_id, source_sheet, source_row)
         )
-    ''')
+    """)
 
-    # 6. Daily Stock Movements
-    cursor.execute('''
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS stock_movements (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             movement_id TEXT NOT NULL,
@@ -174,10 +173,9 @@ def init_db():
             validation_flags_json TEXT DEFAULT '[]',
             UNIQUE(source_id, movement_id)
         )
-    ''')
+    """)
 
-    # 7. Audit Logs
-    cursor.execute('''
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS audit_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp TEXT NOT NULL,
@@ -185,85 +183,66 @@ def init_db():
             description TEXT NOT NULL,
             details TEXT
         )
-    ''')
+    """)
 
-    # Create Indexes for lightning fast searching and filtering
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_inv_source ON inventory_records(source_id)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_inv_search ON inventory_records(product_id, part_no, category)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_mov_source ON stock_movements(source_id, date)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_mov_prod ON stock_movements(product_id, date)')
-
-    # Bootstrap default October 2026 source if database is brand new
-    cursor.execute('SELECT COUNT(*) FROM spreadsheet_sources')
-    if cursor.fetchone()[0] == 0:
-        default_sid = Config.GOOGLE_SHEETS_SPREADSHEET_ID or "1lWYUrq8PvHE_uZQZRKNT7CSbxDN43hdIR86iTWVUwiM"
+    # Seed default source if empty
+    cursor.execute("SELECT count(*) FROM spreadsheet_sources")
+    if cursor.fetchone()[0] == 0 and Config.GOOGLE_SHEETS_SPREADSHEET_ID:
+        default_sid = "default_source"
         now_iso = datetime.now(timezone.utc).isoformat()
-        cursor.execute('''
+        cursor.execute("""
             INSERT INTO spreadsheet_sources (
-                source_id, name, spreadsheet_id, description, period, status, is_active, poll_interval_seconds, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, 1, 30, ?, ?)
-        ''', ("october-2026-master", "October 2026 Stock Master", default_sid, "Primary 6-worksheet master stock register for October 2026", "2026-10", "active", now_iso, now_iso))
-        logger.info("Bootstrapped initial active source: October 2026 Stock Master")
+                source_id, name, spreadsheet_id, description, period, status, is_active,
+                poll_interval_seconds, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 'active', 1, ?, ?, ?)
+        """, (
+            default_sid,
+            "Primary Stock Spreadsheet",
+            Config.GOOGLE_SHEETS_SPREADSHEET_ID,
+            "Default Google Sheets stock register",
+            "",
+            Config.SYNC_INTERVAL_SECONDS,
+            now_iso,
+            now_iso
+        ))
+        logger.info(f"Initialized default spreadsheet source: {Config.GOOGLE_SHEETS_SPREADSHEET_ID}")
 
     conn.commit()
     conn.close()
-    logger.info("Relational database schema initialized with multi-spreadsheet support.")
 
-# ---------------- Source Management Operations ----------------
 
 def list_sources(include_disabled: bool = False) -> List[Dict[str, Any]]:
     conn = get_db_connection()
     cursor = conn.cursor()
-    query = 'SELECT * FROM spreadsheet_sources'
-    if not include_disabled:
-        query += " WHERE status != 'disabled'"
-    query += ' ORDER BY is_active DESC, period DESC, id ASC'
-    cursor.execute(query)
-    rows = [dict(r) for r in cursor.fetchall()]
-    
-    # Enrich with sheet counts and product counts
-    for s in rows:
-        sid = s["source_id"]
-        cursor.execute('SELECT COUNT(*) FROM spreadsheet_sheets WHERE source_id = ?', (sid,))
-        s["sheets_count"] = cursor.fetchone()[0]
-        cursor.execute('SELECT COUNT(*) FROM inventory_records WHERE source_id = ?', (sid,))
-        s["products_count"] = cursor.fetchone()[0]
-        cursor.execute('SELECT COUNT(*) FROM stock_movements WHERE source_id = ?', (sid,))
-        s["movements_count"] = cursor.fetchone()[0]
-
+    if include_disabled:
+        cursor.execute("SELECT * FROM spreadsheet_sources ORDER BY is_active DESC, updated_at DESC")
+    else:
+        cursor.execute("SELECT * FROM spreadsheet_sources WHERE status != 'disabled' ORDER BY is_active DESC, updated_at DESC")
+    rows = cursor.fetchall()
     conn.close()
-    return rows
+    return [dict(r) for r in rows]
+
 
 def get_source(source_id: str) -> Optional[Dict[str, Any]]:
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM spreadsheet_sources WHERE source_id = ? OR id = ?', (source_id, source_id))
+    cursor.execute("SELECT * FROM spreadsheet_sources WHERE source_id = ?", (source_id,))
     row = cursor.fetchone()
-    if not row:
-        conn.close()
-        return None
-    res = dict(row)
-    sid = res["source_id"]
-    cursor.execute('SELECT COUNT(*) FROM spreadsheet_sheets WHERE source_id = ?', (sid,))
-    res["sheets_count"] = cursor.fetchone()[0]
-    cursor.execute('SELECT COUNT(*) FROM inventory_records WHERE source_id = ?', (sid,))
-    res["products_count"] = cursor.fetchone()[0]
-    cursor.execute('SELECT COUNT(*) FROM stock_movements WHERE source_id = ?', (sid,))
-    res["movements_count"] = cursor.fetchone()[0]
     conn.close()
-    return res
+    return dict(row) if row else None
+
 
 def get_active_source() -> Optional[Dict[str, Any]]:
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM spreadsheet_sources WHERE is_active = 1 AND status != 'disabled' LIMIT 1")
+    cursor.execute("SELECT * FROM spreadsheet_sources WHERE is_active = 1 LIMIT 1")
     row = cursor.fetchone()
     if not row:
-        # Fallback to the first available non-disabled source
-        cursor.execute("SELECT * FROM spreadsheet_sources WHERE status != 'disabled' ORDER BY id ASC LIMIT 1")
+        cursor.execute("SELECT * FROM spreadsheet_sources WHERE status = 'active' ORDER BY updated_at DESC LIMIT 1")
         row = cursor.fetchone()
     conn.close()
     return dict(row) if row else None
+
 
 def create_source(
     name: str,
@@ -278,37 +257,39 @@ def create_source(
     cursor = conn.cursor()
 
     sheet_id = extract_spreadsheet_id(spreadsheet_url_or_id)
-    # Generate stable source_id slug
-    slug_base = re.sub(r'[^a-zA-Z0-9]+', '-', (period or name).lower()).strip('-')
+    slug_base = re.sub(r'[^a-zA-Z0-9_]+', '_', name.strip().lower()).strip('_')
     if not slug_base:
-        slug_base = f"source-{int(datetime.now().timestamp())}"
-    source_id = slug_base
-
-    # Ensure uniqueness
-    counter = 1
-    while True:
-        cursor.execute('SELECT id FROM spreadsheet_sources WHERE source_id = ?', (source_id,))
-        if not cursor.fetchone():
-            break
-        source_id = f"{slug_base}-{counter}"
-        counter += 1
+        slug_base = "source"
+    source_id = f"{slug_base}_{int(datetime.now().timestamp())}"
 
     now_iso = datetime.now(timezone.utc).isoformat()
 
     if is_active:
-        # Demote any other active source
-        cursor.execute('UPDATE spreadsheet_sources SET is_active = 0')
+        cursor.execute("UPDATE spreadsheet_sources SET is_active = 0 WHERE is_active = 1")
 
-    cursor.execute('''
+    cursor.execute("""
         INSERT INTO spreadsheet_sources (
-            source_id, name, spreadsheet_id, description, period, status, is_active, poll_interval_seconds, created_at, updated_at
+            source_id, name, spreadsheet_id, description, period, status, is_active,
+            poll_interval_seconds, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (source_id, name.strip(), sheet_id, description.strip(), period.strip(), status, 1 if is_active else 0, max(15, poll_interval), now_iso, now_iso))
+    """, (
+        source_id,
+        name.strip(),
+        sheet_id,
+        description.strip(),
+        period.strip(),
+        status,
+        1 if is_active else 0,
+        max(10, int(poll_interval)),
+        now_iso,
+        now_iso
+    ))
 
     conn.commit()
     conn.close()
-    record_audit("SOURCE_CREATED", f"Registered new spreadsheet source: {name} ({source_id})", {"spreadsheet_id": sheet_id, "period": period})
+    record_audit("SOURCE_CREATED", f"Created spreadsheet source '{name}'", {"source_id": source_id, "sheet_id": sheet_id})
     return get_source(source_id)
+
 
 def update_source(source_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     conn = get_db_connection()
@@ -316,16 +297,17 @@ def update_source(source_id: str, updates: Dict[str, Any]) -> Optional[Dict[str,
 
     fields = []
     vals = []
+
     for k, v in updates.items():
         if k in ("name", "description", "period", "status", "poll_interval_seconds"):
             fields.append(f"{k} = ?")
             vals.append(v)
-        elif k == "spreadsheet_id":
+        elif k in ("spreadsheet_url_or_id", "spreadsheet_id"):
             fields.append("spreadsheet_id = ?")
             vals.append(extract_spreadsheet_id(str(v)))
         elif k == "is_active":
             if v:
-                cursor.execute('UPDATE spreadsheet_sources SET is_active = 0')
+                cursor.execute("UPDATE spreadsheet_sources SET is_active = 0 WHERE is_active = 1")
             fields.append("is_active = ?")
             vals.append(1 if v else 0)
 
@@ -333,90 +315,91 @@ def update_source(source_id: str, updates: Dict[str, Any]) -> Optional[Dict[str,
         conn.close()
         return get_source(source_id)
 
+    now_iso = datetime.now(timezone.utc).isoformat()
     fields.append("updated_at = ?")
-    vals.append(datetime.now(timezone.utc).isoformat())
+    vals.append(now_iso)
     vals.append(source_id)
 
     cursor.execute(f"UPDATE spreadsheet_sources SET {', '.join(fields)} WHERE source_id = ?", vals)
     conn.commit()
     conn.close()
-    record_audit("SOURCE_UPDATED", f"Updated spreadsheet source {source_id}", updates)
+    record_audit("SOURCE_UPDATED", f"Updated source {source_id}", updates)
     return get_source(source_id)
+
 
 def set_active_source(source_id: str) -> bool:
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('UPDATE spreadsheet_sources SET is_active = 0')
-    cursor.execute("UPDATE spreadsheet_sources SET is_active = 1, status = 'active', updated_at = ? WHERE source_id = ?", (datetime.now(timezone.utc).isoformat(), source_id))
-    affected = cursor.rowcount
+    now_iso = datetime.now(timezone.utc).isoformat()
+    cursor.execute("UPDATE spreadsheet_sources SET is_active = 0 WHERE is_active = 1")
+    cursor.execute("UPDATE spreadsheet_sources SET is_active = 1, updated_at = ? WHERE source_id = ?", (now_iso, source_id))
+    affected = cursor.rowcount > 0
     conn.commit()
     conn.close()
-    if affected > 0:
-        record_audit("SOURCE_ACTIVATED", f"Activated spreadsheet source: {source_id}")
-        return True
-    return False
+    if affected:
+        record_audit("SOURCE_ACTIVATED", f"Activated source {source_id}", {"source_id": source_id})
+    return affected
+
 
 def archive_source(source_id: str) -> bool:
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("UPDATE spreadsheet_sources SET status = 'archived', is_active = 0, updated_at = ? WHERE source_id = ?", (datetime.now(timezone.utc).isoformat(), source_id))
-    affected = cursor.rowcount
+    now_iso = datetime.now(timezone.utc).isoformat()
+    cursor.execute("UPDATE spreadsheet_sources SET status = 'archived', is_active = 0, updated_at = ? WHERE source_id = ?", (now_iso, source_id))
+    affected = cursor.rowcount > 0
     conn.commit()
     conn.close()
-    if affected > 0:
-        record_audit("SOURCE_ARCHIVED", f"Archived spreadsheet source: {source_id}")
-        return True
-    return False
+    if affected:
+        record_audit("SOURCE_ARCHIVED", f"Archived source {source_id}", {"source_id": source_id})
+    return affected
+
 
 def delete_source(source_id: str) -> bool:
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('DELETE FROM spreadsheet_sources WHERE source_id = ?', (source_id,))
-    cursor.execute('DELETE FROM spreadsheet_sheets WHERE source_id = ?', (source_id,))
-    cursor.execute('DELETE FROM sheet_column_mappings WHERE source_id = ?', (source_id,))
-    cursor.execute('DELETE FROM inventory_records WHERE source_id = ?', (source_id,))
-    cursor.execute('DELETE FROM stock_movements WHERE source_id = ?', (source_id,))
-    cursor.execute('DELETE FROM sync_history WHERE source_id = ?', (source_id,))
+    cursor.execute("DELETE FROM inventory_records WHERE source_id = ?", (source_id,))
+    cursor.execute("DELETE FROM stock_movements WHERE source_id = ?", (source_id,))
+    cursor.execute("DELETE FROM spreadsheet_sheets WHERE source_id = ?", (source_id,))
+    cursor.execute("DELETE FROM sheet_column_mappings WHERE source_id = ?", (source_id,))
+    cursor.execute("DELETE FROM sync_history WHERE source_id = ?", (source_id,))
+    cursor.execute("DELETE FROM spreadsheet_sources WHERE source_id = ?", (source_id,))
     conn.commit()
     conn.close()
-    record_audit("SOURCE_DELETED", f"Deleted spreadsheet source: {source_id}")
+    record_audit("SOURCE_DELETED", f"Deleted source {source_id}", {"source_id": source_id})
     return True
 
-# ---------------- Sheet & Mapping Operations ----------------
 
-def save_sheets_and_mappings(source_id: str, analysis_report: Dict[str, Any]):
+def save_sheets_and_mappings(source_id: str, analysis_results: List[Dict[str, Any]]):
     conn = get_db_connection()
     cursor = conn.cursor()
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    sheets = analysis_report.get("sheets", {})
-    for idx, (sheet_name, s_data) in enumerate(sheets.items(), start=1):
-        # 1. Save sheet metadata
-        cursor.execute('''
+    for idx, sheet in enumerate(analysis_results):
+        sheet_name = sheet.get("sheet_name", f"Sheet{idx+1}")
+        cursor.execute("""
             INSERT INTO spreadsheet_sheets (
-                source_id, sheet_name, sheet_index, row_count, col_count, data_start_row, status, last_sync_at, issues_json
+                source_id, sheet_name, sheet_index, row_count, col_count, data_start_row,
+                status, last_sync_at, issues_json
             ) VALUES (?, ?, ?, ?, ?, ?, 'success', ?, ?)
             ON CONFLICT(source_id, sheet_name) DO UPDATE SET
+                sheet_index = excluded.sheet_index,
                 row_count = excluded.row_count,
                 col_count = excluded.col_count,
                 data_start_row = excluded.data_start_row,
                 last_sync_at = excluded.last_sync_at,
                 issues_json = excluded.issues_json
-        ''', (
+        """, (
             source_id,
             sheet_name,
             idx,
-            s_data.get("row_count", 0),
-            s_data.get("column_count", 0),
-            s_data.get("data_start_row", 3),
+            sheet.get("row_count", 0),
+            sheet.get("column_count", 0),
+            sheet.get("data_start_row", 3),
             now_iso,
-            json.dumps(s_data.get("issues", []))
+            json.dumps(sheet.get("issues", []))
         ))
 
-        # 2. Save independent column mapping
-        part_no_col = s_data["product_key_candidates"][0] if s_data.get("product_key_candidates") else None
-        unit_price_col = s_data["unit_price_candidates"][0] if s_data.get("unit_price_candidates") else None
-        cursor.execute('''
+        cursor.execute("""
             INSERT INTO sheet_column_mappings (
                 source_id, sheet_name, part_no_col, desc_col, cat_col, uom_col, unit_price_col,
                 amount_cols_json, date_columns_json, extra_mappings_json, updated_at
@@ -427,53 +410,54 @@ def save_sheets_and_mappings(source_id: str, analysis_report: Dict[str, Any]):
                 amount_cols_json = excluded.amount_cols_json,
                 date_columns_json = excluded.date_columns_json,
                 updated_at = excluded.updated_at
-        ''', (
+        """, (
             source_id,
             sheet_name,
-            part_no_col,
-            "Description",
-            "Category",
-            "UOM",
-            unit_price_col,
-            json.dumps(s_data.get("amount_columns", [])),
-            json.dumps(s_data.get("date_columns", [])),
-            json.dumps({"headers": s_data.get("headers", [])}),
+            sheet.get("product_key_col", ""),
+            sheet.get("description_col", "Description"),
+            sheet.get("category_col", ""),
+            sheet.get("uom_col", ""),
+            sheet.get("unit_price_col", ""),
+            json.dumps(sheet.get("amount_columns", [])),
+            json.dumps(sheet.get("date_columns", [])),
+            json.dumps(sheet.get("extra_mappings", {})),
             now_iso
         ))
 
     conn.commit()
     conn.close()
 
+
 def get_sheets_for_source(source_id: str) -> List[Dict[str, Any]]:
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('''
+    cursor.execute("""
         SELECT s.*, m.amount_cols_json, m.date_columns_json, m.unit_price_col, m.part_no_col, m.extra_mappings_json
         FROM spreadsheet_sheets s
         LEFT JOIN sheet_column_mappings m ON s.source_id = m.source_id AND s.sheet_name = m.sheet_name
         WHERE s.source_id = ?
         ORDER BY s.sheet_index ASC
-    ''', (source_id,))
-    rows = []
-    for r in cursor.fetchall():
+    """, (source_id,))
+    rows = cursor.fetchall()
+    conn.close()
+
+    result = []
+    for r in rows:
         d = dict(r)
         d["issues"] = json.loads(d.get("issues_json") or "[]")
         d["amount_columns"] = json.loads(d.get("amount_cols_json") or "[]")
         d["date_columns"] = json.loads(d.get("date_columns_json") or "[]")
-        extra_meta = json.loads(d.get("extra_mappings_json") or "{}")
-        d["headers"] = extra_meta.get("headers", [])
-        rows.append(d)
-    conn.close()
-    return rows
+        d["extra_mappings"] = json.loads(d.get("extra_mappings_json") or "{}")
+        result.append(d)
+    return result
 
-# ---------------- Transactional Inventory & Movement Storage ----------------
 
 def replace_source_snapshot(
     source_id: str,
     period: str,
     products: List[Dict[str, Any]],
     movements: List[Dict[str, Any]],
-    fingerprint: str = ""
+    fingerprint: str
 ) -> bool:
     """Atomically replaces inventory and movements for a specific source without touching other sources."""
     conn = get_db_connection()
@@ -481,20 +465,13 @@ def replace_source_snapshot(
     now_iso = datetime.now(timezone.utc).isoformat()
 
     try:
-        # Clean existing records for THIS source only
-        cursor.execute('DELETE FROM inventory_records WHERE source_id = ?', (source_id,))
-        cursor.execute('DELETE FROM stock_movements WHERE source_id = ?', (source_id,))
+        cursor.execute("DELETE FROM inventory_records WHERE source_id = ?", (source_id,))
+        cursor.execute("DELETE FROM stock_movements WHERE source_id = ?", (source_id,))
 
-        # Batch insert products
         inv_rows = []
         for p in products:
-            # Strictly filter out any amount fields
             extra = p.get("extra_fields", {})
-            safe_extra = {
-                k: v for k, v in extra.items()
-                if not any(kw in k.lower() for kw in ["amount", "total cost", "total price", "val", "closing value"])
-            }
-
+            safe_extra = {k: v for k, v in extra.items() if not any(w in k.lower() for w in ['amount', 'closing value', 'closing stk val', 'total price'])}
             inv_rows.append((
                 source_id,
                 p.get("source_sheet", ""),
@@ -503,28 +480,28 @@ def replace_source_snapshot(
                 p.get("part_no", ""),
                 p.get("description", ""),
                 p.get("category", ""),
-                p.get("uom", "NOS"),
-                str(p.get("unit_price")) if p.get("unit_price") is not None else None,
-                str(p.get("opening_stock")) if p.get("opening_stock") is not None else None,
-                str(p.get("current_stock")) if p.get("current_stock") is not None else None,
+                p.get("uom", ""),
+                str(p.get("unit_price", "NA")),
+                str(p.get("opening_stock", 0)),
+                str(p.get("current_stock", 0)),
                 p.get("latest_date", ""),
-                p.get("min_level", 10),
-                p.get("stock_status", "In Stock"),
-                period or p.get("period", ""),
+                float(p.get("min_level", 10) or 10),
+                p.get("stock_status", "in_stock"),
+                period,
                 json.dumps(safe_extra),
                 json.dumps(p.get("validation_flags", [])),
                 now_iso
             ))
 
-        cursor.executemany('''
-            INSERT INTO inventory_records (
-                source_id, source_sheet, source_row, product_id, part_no, description,
-                category, uom, unit_price, opening_stock, current_stock, latest_date,
-                min_level, stock_status, period, extra_fields_json, validation_flags_json, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', inv_rows)
+        if inv_rows:
+            cursor.executemany("""
+                INSERT OR REPLACE INTO inventory_records (
+                    source_id, source_sheet, source_row, product_id, part_no, description, category,
+                    uom, unit_price, opening_stock, current_stock, latest_date, min_level,
+                    stock_status, period, extra_fields_json, validation_flags_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, inv_rows)
 
-        # Batch insert movements
         mov_rows = []
         for m in movements:
             mov_rows.append((
@@ -537,13 +514,13 @@ def replace_source_snapshot(
                 m.get("part_no", ""),
                 m.get("description", ""),
                 m.get("category", ""),
-                m.get("movement_type", "IN"),
-                m.get("qty", 0.0),
-                m.get("uom", "NOS"),
-                m.get("opening_stock"),
-                m.get("in_qty", 0.0),
-                m.get("out_qty", 0.0),
-                m.get("closing_stock"),
+                m.get("movement_type", "IN/OUT"),
+                float(m.get("qty", 0) or 0),
+                m.get("uom", ""),
+                float(m.get("opening_stock", 0) or 0),
+                float(m.get("in_qty", 0) or 0),
+                float(m.get("out_qty", 0) or 0),
+                float(m.get("closing_stock", 0) or 0),
                 period,
                 m.get("reference_no", ""),
                 m.get("party_name", ""),
@@ -551,16 +528,16 @@ def replace_source_snapshot(
                 json.dumps(m.get("validation_flags", []))
             ))
 
-        cursor.executemany('''
-            INSERT INTO stock_movements (
-                movement_id, source_id, source_sheet, source_row, date, product_id,
-                part_no, description, category, movement_type, qty, uom, opening_stock,
-                in_qty, out_qty, closing_stock, period, reference_no, party_name, remarks, validation_flags_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', mov_rows)
+        if mov_rows:
+            cursor.executemany("""
+                INSERT OR REPLACE INTO stock_movements (
+                    movement_id, source_id, source_sheet, source_row, date, product_id,
+                    part_no, description, category, movement_type, qty, uom, opening_stock,
+                    in_qty, out_qty, closing_stock, period, reference_no, party_name, remarks, validation_flags_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, mov_rows)
 
-        # Update source last_sync metadata
-        cursor.execute('''
+        cursor.execute("""
             UPDATE spreadsheet_sources SET
                 last_sync_at = ?,
                 last_sync_status = 'success',
@@ -568,19 +545,17 @@ def replace_source_snapshot(
                 fingerprint = ?,
                 updated_at = ?
             WHERE source_id = ?
-        ''', (now_iso, fingerprint, now_iso, source_id))
+        """, (now_iso, fingerprint, now_iso, source_id))
 
         conn.commit()
         conn.close()
         return True
-
     except Exception as e:
         conn.rollback()
         conn.close()
         logger.error(f"Failed to replace snapshot for {source_id}: {e}")
         return False
 
-# ---------------- Sync Runs & Audit Logging ----------------
 
 def record_sync_run(
     status: str,
@@ -589,59 +564,76 @@ def record_sync_run(
     movements_count: int,
     fingerprint: str = "",
     error_message: Optional[str] = None,
-    source_id: str = "active",
-    source_name: str = ""
+    source_id: str = "default_source",
+    source_name: Optional[str] = None
 ):
     conn = get_db_connection()
     cursor = conn.cursor()
     now_iso = datetime.now(timezone.utc).isoformat()
-    
-    # Insert in sync_history
-    cursor.execute('''
+
+    cursor.execute("""
         INSERT INTO sync_history (
             source_id, source_name, timestamp, status, sheets_processed,
             products_imported, movements_imported, fingerprint, error_message
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (source_id, source_name, now_iso, status, sheets_processed, products_count, movements_count, fingerprint, error_message))
+    """, (
+        source_id,
+        source_name or source_id,
+        now_iso,
+        status,
+        sheets_processed,
+        products_count,
+        movements_count,
+        fingerprint,
+        error_message
+    ))
 
-    # Keep legacy sync_runs table populated for backwards-compatibility
-    cursor.execute('''
+    cursor.execute("""
         INSERT INTO sync_runs (timestamp, status, sheets_processed, products_count, movements_count, fingerprint, error_message)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (now_iso, status, sheets_processed, products_count, movements_count, fingerprint, error_message))
+    """, (
+        now_iso,
+        status,
+        sheets_processed,
+        products_count,
+        movements_count,
+        fingerprint,
+        error_message
+    ))
 
-    # If error, update source record
-    if status == 'error' and error_message:
-        cursor.execute('''
+    if status == "error":
+        cursor.execute("""
             UPDATE spreadsheet_sources SET
                 last_sync_at = ?,
                 last_sync_status = 'error',
                 last_sync_error = ?,
                 updated_at = ?
             WHERE source_id = ?
-        ''', (now_iso, error_message, now_iso, source_id))
+        """, (now_iso, error_message, now_iso, source_id))
 
     conn.commit()
     conn.close()
+
 
 def record_audit(event_type: str, description: str, details: Any = None):
     conn = get_db_connection()
     cursor = conn.cursor()
-    details_str = json.dumps(details) if details else None
-    cursor.execute('''
+    details_str = json.dumps(details) if details else ""
+    cursor.execute("""
         INSERT INTO audit_logs (timestamp, event_type, description, details)
         VALUES (?, ?, ?, ?)
-    ''', (datetime.now(timezone.utc).isoformat(), event_type, description, details_str))
+    """, (datetime.now(timezone.utc).isoformat(), event_type, description, details_str))
     conn.commit()
     conn.close()
+
 
 def get_recent_sync_runs(source_id: Optional[str] = None, limit: int = 15) -> List[Dict[str, Any]]:
     conn = get_db_connection()
     cursor = conn.cursor()
     if source_id and source_id != "all":
-        cursor.execute('SELECT * FROM sync_history WHERE source_id = ? ORDER BY id DESC LIMIT ?', (source_id, limit))
+        cursor.execute("SELECT * FROM sync_history WHERE source_id = ? ORDER BY id DESC LIMIT ?", (source_id, limit))
     else:
-        cursor.execute('SELECT * FROM sync_history ORDER BY id DESC LIMIT ?', (limit,))
-    rows = [dict(r) for r in cursor.fetchall()]
+        cursor.execute("SELECT * FROM sync_history ORDER BY id DESC LIMIT ?", (limit,))
+    rows = cursor.fetchall()
     conn.close()
-    return rows
+    return [dict(r) for r in rows]

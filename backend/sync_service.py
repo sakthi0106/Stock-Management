@@ -5,7 +5,6 @@ import threading
 import time
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
-
 from config import Config
 from sheets_client import GoogleSheetsClient
 from sheet_analyzer import SheetAnalyzer
@@ -16,520 +15,335 @@ logger = logging.getLogger(__name__)
 
 
 class SourceSyncState:
-    """Holds per-source sync state: client, current service snapshot, lock, and metadata."""
-
-    def __init__(self, source: Dict[str, Any]):
-        self.source_id: str = source["source_id"]
-        self.name: str = source.get("name", source["source_id"])
-        self.spreadsheet_id: str = source.get("spreadsheet_id", "")
-        self.period: str = source.get("period", "")
-        self.poll_interval: int = max(30, source.get("poll_interval_seconds", 30))
-        self.status: str = source.get("status", "active")
-
-        self.client: Optional[GoogleSheetsClient] = None
+    """Tracks state and service for an individual spreadsheet source."""
+    def __init__(self, source_dict: Dict[str, Any], client: Optional[GoogleSheetsClient] = None):
+        self.source = source_dict
+        self.source_id = source_dict.get('source_id', '')
+        self.client = client
         self._service: Optional[InventoryService] = None
-        self._lock = threading.Lock()
-        self._fingerprint: str = ""
-        self.last_sync_at: Optional[str] = None
-        self.last_error: Optional[str] = None
-        self.sync_state: str = "pending"
-        self.sheets_processed: int = 0
-        self.sheet_statuses: List[Dict[str, Any]] = []
+        self._last_fingerprint = source_dict.get('fingerprint', '')
+        self._last_sync_time = source_dict.get('last_sync_at')
+        self._last_sync_status = source_dict.get('last_sync_status', 'pending')
+        self._last_sync_error = source_dict.get('last_sync_error')
+        self._is_syncing = False
 
-    def build_client(self) -> bool:
-        """Instantiate a GoogleSheetsClient for this source's spreadsheet."""
-        if not self.spreadsheet_id:
-            return False
-        try:
-            self.client = GoogleSheetsClient(spreadsheet_id=self.spreadsheet_id)
-            return True
-        except Exception as e:
-            logger.warning(f"[{self.source_id}] Could not build sheets client: {e}")
-            return False
+    def build_client(self) -> GoogleSheetsClient:
+        if self.client:
+            return self.client
+        sheet_id = self.source.get('spreadsheet_id', '')
+        self.client = GoogleSheetsClient(spreadsheet_id=sheet_id)
+        return self.client
 
     def get_service(self) -> Optional[InventoryService]:
-        with self._lock:
-            return self._service
+        if not self._service:
+            # Fallback to loading DB records for this source
+            self._service = InventoryService(source_id=self.source_id, period=self.source.get('period', ''))
+        return self._service
 
-    def set_service(self, service: InventoryService, fingerprint: str, sheet_statuses: List[Dict], is_sync: bool = True):
-        with self._lock:
-            self._service = service
-            self._fingerprint = fingerprint
-            self.sheets_processed = len(sheet_statuses)
-            self.sheet_statuses = sheet_statuses
-            if is_sync:
-                self.last_sync_at = datetime.now(timezone.utc).isoformat()
-                self.sync_state = "success"
-            else:
-                self.last_sync_at = None
-                self.sync_state = "connected"
-            self.last_error = None
+    def set_service(self, srv: InventoryService):
+        self._service = srv
 
     @property
     def fingerprint(self) -> str:
-        return self._fingerprint
+        return self._last_fingerprint
 
 
 class MultiSourceSyncService:
-    """
-    Manages multiple Google Spreadsheet sources independently.
-    Each source has its own GoogleSheetsClient, InventoryService snapshot,
-    sync lock, and fingerprint for change detection.
-    """
-
-    def __init__(self):
+    """Manages multi-source inventory polling, sync and unified queries."""
+    def __init__(self, default_client: Optional[GoogleSheetsClient] = None):
+        self.default_client = default_client or GoogleSheetsClient()
         self._sources: Dict[str, SourceSyncState] = {}
-        self._sources_lock = threading.Lock()
-        self._is_running = False
-        self._poll_thread: Optional[threading.Thread] = None
-
+        self._sources_lock = threading.RLock()
+        self._poller_thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
         self._local_state: Optional[SourceSyncState] = None
-        self._load_local_snapshot()
-        self._initialize_sources()
 
-    # ------------------------------------------------------------------ #
-    #  Initialization                                                       #
-    # ------------------------------------------------------------------ #
+        self._initialize_sources()
+        self._load_local_snapshot()
 
     def _load_local_snapshot(self):
-        """Make the bundled Excel workbook available immediately at startup."""
         try:
             local_client = GoogleSheetsClient(local_only=True)
             active_src = database.get_active_source()
-            source_id = active_src["source_id"] if active_src else "october-2026-master"
-            period = active_src.get("period", "") if active_src else "2026-10"
+            source_id = active_src['source_id'] if active_src else 'october-2026-master'
+            period = active_src.get('period', '') if active_src else '2026-10'
 
             metadata = local_client.get_spreadsheet_metadata()
+            sheets_info = metadata.get('sheets', [])
             sheet_names = [
-                s.get("properties", {}).get("title", "")
-                for s in metadata.get("sheets", [])
-                if s.get("properties", {}).get("title")
+                s.get('properties', {}).get('title', '')
+                for s in sheets_info
+                if s.get('properties', {}).get('title')
             ]
-            raw_data = local_client.get_batch_sheet_values(sheet_names)
-            analysis = SheetAnalyzer(local_client).analyze_all_sheets(
-                metadata, raw_data, {sn: [] for sn in sheet_names}
-            )
-            service = InventoryService(analysis, raw_data, source_id=source_id, period=period)
 
-            dummy_src = {
-                "source_id": source_id,
-                "name": "Local Snapshot",
-                "spreadsheet_id": "",
-                "period": period,
-                "poll_interval_seconds": 30,
-                "status": "active",
-            }
-            state = SourceSyncState(dummy_src)
-            sheet_statuses = [
-                {
-                    "name": sn,
-                    "status": "success",
-                    "row_count": len(raw_data.get(sn, [])),
-                    "last_sync": None,
-                    "issues": analysis["sheets"].get(sn, {}).get("issues", []),
-                }
-                for sn in sheet_names
-            ]
-            state.set_service(service, "", sheet_statuses, is_sync=False)
-            self._local_state = state
-            logger.info(
-                f"Local snapshot loaded: {len(sheet_names)} sheets, "
-                f"{len(service.products)} products, {len(service.movements)} movements."
-            )
+            raw_data = local_client.get_batch_sheet_values(sheet_names)
+            analyzer = SheetAnalyzer(local_client)
+            analysis = analyzer.analyze_all_sheets(metadata=metadata, raw_values=raw_data, raw_formulas={sn: [] for sn in sheet_names})
+
+            srv = InventoryService(analysis_report=analysis, raw_sheets_data=raw_data, source_id=source_id, period=period)
+            self._local_state = SourceSyncState({'source_id': source_id, 'name': 'Local Snapshot', 'period': period}, local_client)
+            self._local_state.set_service(srv)
+            logger.info(f"Loaded local snapshot with {len(srv.products)} products and {len(srv.movements)} movements.")
         except Exception as e:
-            logger.exception(f"Could not load local snapshot: {e}")
+            logger.warning(f"Could not load local snapshot: {e}. Falling back to DB inventory.")
+            srv = InventoryService(source_id='default_source')
+            self._local_state = SourceSyncState({'source_id': 'default_source', 'name': 'Database Snapshot'}, None)
+            self._local_state.set_service(srv)
 
     def _initialize_sources(self):
-        """Load all non-disabled sources from DB and build their clients."""
-        try:
+        with self._sources_lock:
             sources = database.list_sources(include_disabled=False)
-            with self._sources_lock:
-                for src in sources:
-                    if src.get("status") == "disabled":
-                        continue
-                    state = SourceSyncState(src)
-                    if src.get("spreadsheet_id"):
-                        state.build_client()
-                    if self._local_state and (src.get("is_active") or src["source_id"] == self._local_state.source_id):
-                        local_svc = self._local_state.get_service()
-                        if local_svc:
-                            state.set_service(local_svc, "", self._local_state.sheet_statuses, is_sync=False)
-                            state.sync_state = "connected"
-                    self._sources[src["source_id"]] = state
-            logger.info(f"Initialized {len(self._sources)} spreadsheet source(s) from database.")
-        except Exception as e:
-            logger.exception(f"Failed to initialize sources from DB: {e}")
-
-    # ------------------------------------------------------------------ #
-    #  Background Polling                                                   #
-    # ------------------------------------------------------------------ #
+            for s in sources:
+                sid = s['source_id']
+                client = self.default_client if s.get('is_active') and self.default_client.spreadsheet_id == s.get('spreadsheet_id') else None
+                self._sources[sid] = SourceSyncState(s, client)
 
     def start_background_poller(self):
-        if self._is_running:
+        if self._poller_thread and self._poller_thread.is_alive():
             return
-        any_live = any(
-            s.client and s.client.is_configured()
-            for s in self._sources.values()
-        )
-        if not any_live:
-            logger.info("No live Google Sheets configured; background poller not started.")
-            return
-        self._is_running = True
-        self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
-        self._poll_thread.start()
-        logger.info("Multi-source background poller started.")
+        self._stop_event.clear()
+        self._poller_thread = threading.Thread(target=self._poll_loop, daemon=True, name="SyncPollerThread")
+        self._poller_thread.start()
+        logger.info("Started background inventory synchronization poller.")
 
     def stop_background_poller(self):
-        self._is_running = False
+        self._stop_event.set()
+        if self._poller_thread:
+            self._poller_thread.join(timeout=3.0)
 
     def _poll_loop(self):
-        while self._is_running:
+        while not self._stop_event.is_set():
             try:
-                with self._sources_lock:
-                    source_ids = list(self._sources.keys())
-                for sid in source_ids:
-                    if not self._is_running:
-                        break
-                    try:
-                        self.sync_source(sid)
-                    except Exception as e:
-                        logger.error(f"[{sid}] Unhandled sync error (continuing): {e}")
+                active_src = database.get_active_source()
+                if active_src:
+                    self.sync_source(active_src['source_id'], force=False)
             except Exception as e:
-                logger.error(f"Poll loop error: {e}")
-            if self._is_running:
-                time.sleep(max(30, Config.SYNC_INTERVAL_SECONDS))
+                logger.error(f"Error in background sync loop: {e}")
+            time.sleep(Config.SYNC_INTERVAL_SECONDS)
 
-    # ------------------------------------------------------------------ #
-    #  Source Registration                                                  #
-    # ------------------------------------------------------------------ #
-
-    def register_source(self, source: Dict[str, Any]) -> bool:
-        """Dynamically register a new source after DB creation."""
-        sid = source.get("source_id", "")
-        if not sid:
-            return False
-        state = SourceSyncState(source)
-        if source.get("spreadsheet_id"):
-            state.build_client()
+    def register_source(self, source_dict: Dict[str, Any]):
         with self._sources_lock:
-            self._sources[sid] = state
-        logger.info(f"Registered new source in-memory: {sid}")
-        return True
+            sid = source_dict['source_id']
+            self._sources[sid] = SourceSyncState(source_dict)
 
     def unregister_source(self, source_id: str):
         with self._sources_lock:
             self._sources.pop(source_id, None)
 
     def reload_sources(self):
-        """Re-read all sources from DB and refresh in-memory registry."""
-        try:
-            sources = database.list_sources(include_disabled=False)
-            new_states: Dict[str, SourceSyncState] = {}
-            with self._sources_lock:
-                for src in sources:
-                    if src.get("status") == "disabled":
-                        continue
-                    sid = src["source_id"]
-                    if sid in self._sources:
-                        existing = self._sources[sid]
-                        existing.name = src.get("name", sid)
-                        existing.period = src.get("period", "")
-                        existing.status = src.get("status", "active")
-                        new_states[sid] = existing
-                    else:
-                        state = SourceSyncState(src)
-                        if src.get("spreadsheet_id"):
-                            state.build_client()
-                        new_states[sid] = state
-                self._sources = new_states
-        except Exception as e:
-            logger.exception(f"reload_sources failed: {e}")
+        self._initialize_sources()
 
-    # ------------------------------------------------------------------ #
-    #  Sync                                                                 #
-    # ------------------------------------------------------------------ #
-
-    def sync_source(self, source_id: str, force: bool = False) -> bool:
-        """
-        Synchronize a single source independently.
-        One source failure does NOT affect others.
-        """
+    def sync_source(self, source_id: str, force: bool = False) -> Tuple[bool, Dict[str, Any]]:
         with self._sources_lock:
             state = self._sources.get(source_id)
+            if not state:
+                src_dict = database.get_source(source_id)
+                if not src_dict:
+                    return False, {"error": "Source not found"}
+                state = SourceSyncState(src_dict)
+                self._sources[source_id] = state
 
-        if state is None:
-            logger.warning(f"sync_source called for unknown source: {source_id}")
-            return False
+        if state._is_syncing and not force:
+            return False, {"status": "already_syncing"}
 
-        if state.status == "disabled":
-            logger.debug(f"[{source_id}] Source disabled; skipping sync.")
-            return False
-
-        if not state.client or not state.client.is_configured():
-            logger.debug(f"[{source_id}] No live client; skipping remote sync.")
-            return state.get_service() is not None
-
-        t_start = time.time()
+        state._is_syncing = True
         try:
-            analyzer = SheetAnalyzer(state.client)
-            metadata = state.client.get_spreadsheet_metadata()
+            client = state.build_client()
+            metadata = client.get_spreadsheet_metadata()
+            sheets_info = metadata.get('sheets', [])
             sheet_names = [
-                s.get("properties", {}).get("title", "")
-                for s in metadata.get("sheets", [])
-                if s.get("properties", {}).get("title")
+                s.get('properties', {}).get('title', '')
+                for s in sheets_info
+                if s.get('properties', {}).get('title')
             ]
-            raw_data = state.client.get_batch_sheet_values(sheet_names)
-            raw_formulas = state.client.get_batch_sheet_formulas(sheet_names)
-            analysis = analyzer.analyze_all_sheets(metadata, raw_data, raw_formulas)
 
-            hasher = hashlib.sha256()
-            sheet_statuses = []
-            for sn in sheet_names:
-                vals = raw_data.get(sn, [])
-                hasher.update(json.dumps(vals, default=str, sort_keys=True).encode("utf-8"))
-                sheet_statuses.append({
-                    "name": sn,
-                    "status": "success",
-                    "row_count": len(vals),
-                    "last_sync": datetime.now(timezone.utc).isoformat(),
-                    "issues": analysis.get("sheets", {}).get(sn, {}).get("issues", []),
-                })
-            new_fp = hasher.hexdigest()
+            raw_data = client.get_batch_sheet_values(sheet_names)
 
-            if not force and new_fp == state.fingerprint and state.get_service() is not None:
-                logger.debug(f"[{source_id}] Unchanged; skipping snapshot replacement.")
-                return True
+            # Compute fingerprint
+            fp_hasher = hashlib.md5()
+            for sname in sorted(raw_data.keys()):
+                fp_hasher.update(sname.encode('utf-8'))
+                for r in raw_data[sname]:
+                    fp_hasher.update(str(r).encode('utf-8'))
+            fingerprint = fp_hasher.hexdigest()
 
-            service = InventoryService(
-                analysis, raw_data,
+            if not force and fingerprint == state.fingerprint:
+                state._last_sync_time = datetime.now(timezone.utc).isoformat()
+                state._last_sync_status = "success"
+                return True, {"status": "unchanged", "fingerprint": fingerprint}
+
+            analyzer = SheetAnalyzer(client)
+            analysis = analyzer.analyze_all_sheets(metadata=metadata, raw_values=raw_data)
+
+            database.save_sheets_and_mappings(source_id, list(analysis.get('sheets', {}).values()))
+
+            srv = InventoryService(
+                analysis_report=analysis,
+                raw_sheets_data=raw_data,
                 source_id=source_id,
-                period=state.period
+                period=state.source.get('period', '')
             )
-            state.set_service(service, new_fp, sheet_statuses)
+            state.set_service(srv)
 
-            duration_ms = int((time.time() - t_start) * 1000)
-
-            database.save_sheets_and_mappings(source_id, analysis)
+            # Persist to SQLite
             database.replace_source_snapshot(
                 source_id=source_id,
-                period=state.period,
-                products=service.products,
-                movements=service.movements,
-                fingerprint=new_fp
+                period=state.source.get('period', ''),
+                products=srv.products,
+                movements=srv.movements,
+                fingerprint=fingerprint
             )
+
             database.record_sync_run(
                 status="success",
-                sheets_processed=len(sheet_names),
-                products_count=len(service.products),
-                movements_count=len(service.movements),
-                fingerprint=new_fp,
+                sheets_processed=len(analysis.get('sheets', {})),
+                products_count=len(srv.products),
+                movements_count=len(srv.movements),
+                fingerprint=fingerprint,
                 source_id=source_id,
-                source_name=state.name
+                source_name=state.source.get('name')
             )
-            database.record_audit(
-                "SYNC_SUCCESS",
-                f"[{source_id}] {len(sheet_names)} sheets, "
-                f"{len(service.products)} products, {len(service.movements)} movements in {duration_ms}ms"
-            )
-            logger.info(
-                f"[{source_id}] Sync complete — {len(sheet_names)} sheets, "
-                f"{len(service.products)} products, {len(service.movements)} movements."
-            )
-            return True
 
+            state._last_fingerprint = fingerprint
+            state._last_sync_time = datetime.now(timezone.utc).isoformat()
+            state._last_sync_status = "success"
+            state._last_sync_error = None
+
+            return True, {
+                "status": "success",
+                "products_count": len(srv.products),
+                "movements_count": len(srv.movements),
+                "fingerprint": fingerprint
+            }
         except Exception as e:
-            err_msg = str(e)
-            state.last_error = err_msg
-            state.sync_state = "warning" if state.get_service() else "error"
-            logger.warning(f"[{source_id}] Sync failed: {err_msg}. Keeping existing snapshot.")
-
+            logger.error(f"Sync failed for source '{source_id}': {e}")
+            state._last_sync_status = "error"
+            state._last_sync_error = str(e)
             database.record_sync_run(
-                status="warning",
-                sheets_processed=state.sheets_processed,
-                products_count=len(state.get_service().products) if state.get_service() else 0,
-                movements_count=len(state.get_service().movements) if state.get_service() else 0,
-                error_message=err_msg,
+                status="error",
+                sheets_processed=0,
+                products_count=0,
+                movements_count=0,
+                error_message=str(e),
                 source_id=source_id,
-                source_name=state.name
+                source_name=state.source.get('name')
             )
-            return state.get_service() is not None
+            return False, {"status": "error", "error": str(e)}
+        finally:
+            state._is_syncing = False
 
-    def perform_sync(self, force: bool = False) -> bool:
-        """Sync the active source — backwards-compatible with single-source SyncService."""
-        active = database.get_active_source()
-        if active:
-            return self.sync_source(active["source_id"], force=force)
-        with self._sources_lock:
-            ids = list(self._sources.keys())
-        return any(self.sync_source(sid, force=force) for sid in ids)
-
-    # ------------------------------------------------------------------ #
-    #  Service Access                                                       #
-    # ------------------------------------------------------------------ #
+    def perform_sync(self, source_id: str = "active", force: bool = True) -> Tuple[bool, Dict[str, Any]]:
+        if source_id == "active":
+            active_src = database.get_active_source()
+            sid = active_src['source_id'] if active_src else "default_source"
+        else:
+            sid = source_id
+        return self.sync_source(sid, force=force)
 
     def get_service(self, source_filter: str = "active") -> Optional[InventoryService]:
-        """
-        Return an InventoryService for the given filter:
-          "active"    → currently active source (fallback: local snapshot)
-          "all"       → combined view of all non-disabled sources
-          <source_id> → that specific source only
-        """
         if source_filter == "active":
-            active = database.get_active_source()
-            sid = active["source_id"] if active else None
+            active_src = database.get_active_source()
+            sid = active_src['source_id'] if active_src else None
             if sid:
                 with self._sources_lock:
                     state = self._sources.get(sid)
-                if state and state.get_service():
-                    return state.get_service()
-            if self._local_state:
+                    if state and state.get_service():
+                        return state.get_service()
+            if self._local_state and self._local_state.get_service():
                 return self._local_state.get_service()
-            return None
+            return InventoryService(source_id="default_source")
 
         if source_filter == "all":
             return self._get_combined_service()
 
         with self._sources_lock:
             state = self._sources.get(source_filter)
-        if state and state.get_service():
-            return state.get_service()
-        return self._local_state.get_service() if self._local_state else None
+            if state and state.get_service():
+                return state.get_service()
 
-    def _get_combined_service(self) -> Optional[InventoryService]:
-        """Merge data from all non-disabled sources into a synthetic InventoryService."""
+        if self._local_state and self._local_state.get_service():
+            return self._local_state.get_service()
+        return InventoryService(source_id=source_filter)
+
+    def _get_combined_service(self) -> InventoryService:
+        combined = InventoryService(source_id="all")
         with self._sources_lock:
-            states = list(self._sources.values())
-
-        all_products: List[Dict[str, Any]] = []
-        all_movements: List[Dict[str, Any]] = []
-
-        for state in states:
-            if state.status == "disabled":
-                continue
-            svc = state.get_service()
-            if svc:
-                all_products.extend(svc.products)
-                all_movements.extend(svc.movements)
-
-        if not all_products and self._local_state:
-            svc = self._local_state.get_service()
-            if svc:
-                return svc
-
-        if not all_products:
-            return None
-
-        combined = InventoryService.__new__(InventoryService)
-        combined.source_id = "all"
-        combined.period = ""
-        combined.analysis = {}
-        combined.raw_data = {}
-        combined.products = all_products
-        combined.movements = sorted(
-            all_movements, key=lambda m: (m["date"], m.get("source_id", ""), m["product_id"])
-        )
-        combined.data_quality_issues = []
+            for s in self._sources.values():
+                srv = s.get_service()
+                if srv:
+                    combined.products.extend(srv.products)
+                    combined.movements.extend(srv.movements)
+        if not combined.products and self._local_state:
+            srv = self._local_state.get_service()
+            if srv:
+                combined.products.extend(srv.products)
+                combined.movements.extend(srv.movements)
         return combined
 
-    # ------------------------------------------------------------------ #
-    #  Status                                                              #
-    # ------------------------------------------------------------------ #
-
-    def get_status(self, source_filter: str = "active") -> Dict[str, Any]:
-        """Return sync status. Backwards-compatible with legacy SyncService.get_status()."""
-        active = database.get_active_source()
-        sid = active["source_id"] if active else None
-        with self._sources_lock:
-            state = self._sources.get(sid) if sid else None
-
-        if state and (state.get_service() is not None or state.sheets_processed > 0):
-            return {
-                "state": state.sync_state if state.get_service() else "pending",
-                "is_live_google_sheet": bool(state.client and state.client.is_configured()),
-                "lastSuccess": state.last_sync_at,
-                "lastError": state.last_error,
-                "sheetsProcessed": state.sheets_processed,
-                "sheets": state.sheet_statuses,
-                "source_id": sid,
-                "source_name": state.name,
-            }
-
-        local = self._local_state
-        if local and local.get_service():
-            return {
-                "state": "connected",
-                "is_live_google_sheet": False,
-                "lastSuccess": local.last_sync_at,
-                "lastError": None,
-                "sheetsProcessed": local.sheets_processed,
-                "sheets": local.sheet_statuses,
-                "source_id": local.source_id,
-                "source_name": "Local Snapshot",
-            }
+    def get_status(self) -> Dict[str, Any]:
+        active_src = database.get_active_source()
+        srv = self.get_service("active")
+        is_live = False
+        sheets = []
+        if active_src:
+            sid = active_src['source_id']
+            sheets_data = database.get_sheets_for_source(sid)
+            for s in sheets_data:
+                issues = []
+                try:
+                    issues = json.loads(s.get("issues_json") or "[]")
+                except Exception:
+                    pass
+                sheets.append({
+                    "name": s.get("sheet_name", ""),
+                    "status": s.get("status", "success"),
+                    "row_count": s.get("row_count", 0),
+                    "last_sync": s.get("last_sync_at"),
+                    "issues": issues
+                })
+            with self._sources_lock:
+                st = self._sources.get(sid)
+                if st and st.client and st.client.is_configured():
+                    is_live = True
 
         return {
-            "state": "error",
-            "is_live_google_sheet": False,
-            "lastSuccess": None,
-            "lastError": "No service initialized",
-            "sheetsProcessed": 0,
-            "sheets": [],
+            "state": "connected" if is_live else "demo",
+            "is_live_google_sheet": is_live,
+            "lastSuccess": active_src.get('last_sync_at') if active_src else None,
+            "lastError": active_src.get('last_sync_error') if active_src else None,
+            "source": active_src.get('name', 'Default Source') if active_src else "Primary Stock Sheet",
+            "itemsSynced": len(srv.products) if srv else 0,
+            "sheetsProcessed": len(sheets),
+            "sheets": sheets,
+            "nextSync": None
         }
 
     def get_source_status(self, source_id: str) -> Dict[str, Any]:
         with self._sources_lock:
             state = self._sources.get(source_id)
-        if not state:
-            return {}
-        return {
-            "source_id": source_id,
-            "name": state.name,
-            "state": state.sync_state,
-            "is_live": bool(state.client and state.client.is_configured()),
-            "lastSuccess": state.last_sync_at,
-            "lastError": state.last_error,
-            "sheetsProcessed": state.sheets_processed,
-            "sheets": state.sheet_statuses,
-        }
+            if state:
+                return {
+                    "source_id": source_id,
+                    "status": state._last_sync_status,
+                    "last_sync_at": state._last_sync_time,
+                    "error": state._last_sync_error
+                }
+        src = database.get_source(source_id)
+        if src:
+            return {
+                "source_id": source_id,
+                "status": src.get('last_sync_status', 'pending'),
+                "last_sync_at": src.get('last_sync_at'),
+                "error": src.get('last_sync_error')
+            }
+        return {"source_id": source_id, "status": "unknown"}
 
     def get_all_source_statuses(self) -> List[Dict[str, Any]]:
-        with self._sources_lock:
-            sids = list(self._sources.keys())
-        return [self.get_source_status(sid) for sid in sids]
+        sources = database.list_sources(include_disabled=True)
+        return [self.get_source_status(s['source_id']) for s in sources]
 
-
-# ------------------------------------------------------------------ #
-#  Backwards-Compatible Alias                                          #
-# ------------------------------------------------------------------ #
 
 class SyncService(MultiSourceSyncService):
-    """
-    Drop-in replacement preserving the original SyncService(sheets_client) API.
-    """
-
-    def __init__(self, sheets_client: Optional[GoogleSheetsClient] = None):
-        super().__init__()
-        if sheets_client and sheets_client.is_configured():
-            active = database.get_active_source()
-            if active:
-                sid = active["source_id"]
-                with self._sources_lock:
-                    state = self._sources.get(sid)
-                if state:
-                    state.client = sheets_client
-                else:
-                    dummy = {
-                        "source_id": sid,
-                        "name": active.get("name", sid),
-                        "spreadsheet_id": active.get("spreadsheet_id", ""),
-                        "period": active.get("period", ""),
-                        "poll_interval_seconds": 30,
-                        "status": "active",
-                    }
-                    s = SourceSyncState(dummy)
-                    s.client = sheets_client
-                    with self._sources_lock:
-                        self._sources[sid] = s
-
-    def get_service(self, source_filter: str = "active") -> Optional[InventoryService]:  # type: ignore[override]
-        return super().get_service(source_filter)
+    """Backwards compatible alias for MultiSourceSyncService."""
+    def __init__(self, default_client: Optional[GoogleSheetsClient] = None):
+        super().__init__(default_client=default_client)

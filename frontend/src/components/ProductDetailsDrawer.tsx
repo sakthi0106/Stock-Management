@@ -39,7 +39,7 @@ export const ProductDetailsDrawer: React.FC<ProductDetailsDrawerProps> = ({ prod
           <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-slate-50">
             <div>
               <span className="font-mono text-xs font-bold text-cyan-700 bg-cyan-50 px-2 py-0.5 rounded border border-cyan-100">
-                {product.part_no && product.part_no !== "NA" ? product.part_no : product.product_id}
+                {product.part_no && !['NA', '-', 'None', ''].includes(product.part_no) ? product.part_no : (product.product_id && !['NA', '-', 'None', ''].includes(product.product_id) ? product.product_id : `${product.source_sheet} #${product.source_row}`)}
               </span>
               <h2 className="text-lg font-bold text-slate-900 mt-1.5">
                 {product.description}

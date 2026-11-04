@@ -91,7 +91,7 @@ export const InventoryTable: React.FC<InventoryTableProps> = ({
                   className="hover:bg-slate-50/80 transition-colors cursor-pointer group"
                 >
                   <td className="py-3.5 px-4 font-mono font-bold text-cyan-700 text-xs">
-                    <div>{p.part_no && p.part_no !== "NA" ? p.part_no : p.product_id}</div>
+                    <div>{p.part_no && !['NA', '-', 'None', ''].includes(p.part_no) ? p.part_no : (p.product_id && !['NA', '-', 'None', ''].includes(p.product_id) ? p.product_id : `${p.source_sheet} #${p.source_row}`)}</div>
                     <div className="text-[10px] font-normal text-slate-400 mt-0.5">{p.source_sheet}</div>
                   </td>
                   <td className="py-3.5 px-4 font-medium text-slate-900 max-w-[280px] truncate" title={p.description}>

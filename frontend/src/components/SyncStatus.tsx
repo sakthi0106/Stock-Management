@@ -52,11 +52,11 @@ export const SyncStatus: React.FC<SyncStatusProps> = ({ status, syncing, onRefre
       <div>
         <h3 className="text-sm font-bold uppercase tracking-wider text-slate-700 mb-3 flex items-center gap-2">
           <FileSpreadsheet size={16} className="text-cyan-600" />
-          <span>Discovered Worksheets ({status.sheets.length})</span>
+          <span>Discovered Worksheets ({(status.sheets || []).length})</span>
         </h3>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {status.sheets.map((s) => {
+          {(status.sheets || []).map((s) => {
             const isOk = s.status === 'success';
             return (
               <div

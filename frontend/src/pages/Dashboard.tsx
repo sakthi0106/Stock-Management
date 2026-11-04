@@ -23,22 +23,45 @@ export const Dashboard: React.FC<DashboardProps> = ({
 }) => {
   const [data, setData] = useState<DashboardKPI | null>(null);
   const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let isMounted = true;
+  const fetchDashboard = () => {
     setLoading(true);
+    setFetchError(null);
     apiClient.getDashboard(selectedSource)
       .then((res) => {
-        if (isMounted) setData(res);
+        setData(res);
       })
-      .catch((err) => console.error(err))
+      .catch((err) => {
+        console.error('Failed to load dashboard:', err);
+        setFetchError(err.message || 'Unable to connect to inventory backend server.');
+      })
       .finally(() => {
-        if (isMounted) setLoading(false);
+        setLoading(false);
       });
-    return () => {
-      isMounted = false;
-    };
+  };
+
+  useEffect(() => {
+    fetchDashboard();
   }, [refreshKey, selectedSource]);
+
+  if (fetchError && !data) {
+    return (
+      <div className="p-8 bg-rose-50 border border-rose-200 rounded-2xl text-center space-y-4">
+        <div className="inline-flex p-3 bg-rose-100 text-rose-700 rounded-full">
+          <AlertTriangle size={28} />
+        </div>
+        <h3 className="text-lg font-bold text-rose-900">Failed to Load Inventory Dashboard</h3>
+        <p className="text-sm text-rose-600 max-w-md mx-auto">{fetchError}</p>
+        <button
+          onClick={fetchDashboard}
+          className="px-4 py-2 bg-rose-600 text-white rounded-xl text-sm font-semibold hover:bg-rose-700 shadow-sm transition"
+        >
+          Retry Loading
+        </button>
+      </div>
+    );
+  }
 
   if (loading || !data) {
     return (
