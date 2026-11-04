@@ -14,6 +14,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onSelectTab, isOpe
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'inventory', label: 'Inventory Master', icon: Layers },
     { id: 'movements', label: 'Stock Movements', icon: ArrowLeftRight },
+    { id: 'intelligence', label: 'Spreadsheet Intelligence', icon: Sparkles },
     { id: 'reports', label: 'Reports & Audit', icon: FileBarChart },
     { id: 'quality', label: 'Data Quality', icon: CheckCircle2 },
     { id: 'sources', label: 'Spreadsheet Sources', icon: Database },

@@ -23,3 +23,9 @@ dist-ssr/
 
 # Logs
 *.log
+
+# Uploads
+backend/uploads/*
+!backend/uploads/.gitkeep
+*.xlsx
+*.xls

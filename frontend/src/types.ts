@@ -15,6 +15,11 @@ export interface SpreadsheetSource {
   sheets_count: number;
   products_count: number;
   movements_count: number;
+  source_type?: 'google_sheets' | 'excel_upload';
+  total_worksheets?: number;
+  total_records?: number;
+  last_analyzed_at?: string | null;
+  analysis_status?: 'idle' | 'analyzing' | 'completed' | 'failed';
   live_state?: string;
   is_live_google_sheet?: boolean;
   sheets?: SheetInfo[];
@@ -141,3 +146,94 @@ export interface DataQualityReport {
   duplicate_ids: string[];
   sheets_analyzed: number;
 }
+
+// ==========================================
+// SPREADSHEET INTELLIGENCE TYPES
+// ==========================================
+
+export interface WorksheetMetadata {
+  id: number;
+  source_id: string;
+  sheet_name: string;
+  row_count: number;
+  col_count: number;
+  header_row: number;
+  structure_type: string;
+  classification: 'inventory_summary' | 'stock_movement' | 'price_catalog' | 'reference_catalog' | 'general_data' | 'unknown';
+  quality_score: number;
+  analysis_status: string;
+  summary: {
+    quality_issues?: string[];
+    duplicate_candidates?: string[];
+    header_rows?: number[];
+    data_start_row?: number;
+  };
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DynamicColumn {
+  id: number;
+  source_id: string;
+  sheet_name: string;
+  column_index: number;
+  original_col: string;
+  normalized_col: string;
+  inferred_role:
+    | 'product_id'
+    | 'description'
+    | 'category'
+    | 'uom'
+    | 'unit_price'
+    | 'opening_stock'
+    | 'in_qty'
+    | 'out_qty'
+    | 'closing_stock'
+    | 'date'
+    | 'unknown';
+  inferred_type: string;
+  confidence: number;
+  sample_values: string[];
+  stats: {
+    populated_pct?: number;
+    unique_count?: number;
+  };
+  mapping_status: 'auto' | 'approved' | 'rejected' | 'custom';
+  requires_review: number;
+  reason: string;
+  updated_at: string;
+}
+
+export interface DynamicRecord {
+  id: number;
+  source_id: string;
+  sheet_name: string;
+  row_index: number;
+  raw_data: Record<string, any>;
+  inferred_data: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface IntelligenceDataQualityReport {
+  source_id: string;
+  total_worksheets: number;
+  total_rows: number;
+  total_columns: number;
+  recognized_fields: number;
+  unknown_fields: number;
+  requires_review_count: number;
+  overall_quality_score: number;
+  duplicate_candidates: string[];
+  quality_issues: string[];
+}
+
+export interface AnalysisTaskStatus {
+  status: 'pending' | 'analyzing' | 'completed' | 'failed' | 'unknown';
+  progress?: string;
+  error?: string;
+  source_id?: string;
+  total_sheets?: number;
+  total_records?: number;
+}
+

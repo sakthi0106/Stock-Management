@@ -1,4 +1,5 @@
 import re
+import math
 import sqlite3
 import json
 import logging
@@ -10,8 +11,9 @@ logger = logging.getLogger(__name__)
 
 
 def get_db_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(Config.DATABASE_PATH)
+    conn = sqlite3.connect(Config.DATABASE_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 
@@ -52,8 +54,84 @@ def init_db():
             last_sync_status TEXT DEFAULT 'pending', -- 'success', 'warning', 'error', 'pending'
             last_sync_error TEXT,
             fingerprint TEXT DEFAULT '',
+            source_type TEXT DEFAULT 'google_sheets', -- 'google_sheets', 'excel_upload'
+            total_worksheets INTEGER DEFAULT 0,
+            total_records INTEGER DEFAULT 0,
+            last_analyzed_at TEXT,
+            analysis_status TEXT DEFAULT 'idle', -- 'idle', 'analyzing', 'completed', 'failed'
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
+        )
+    """)
+
+    # Safe migration for existing installations missing new source fields
+    cursor.execute("PRAGMA table_info(spreadsheet_sources)")
+    source_cols = [c[1] for c in cursor.fetchall()]
+    if 'source_type' not in source_cols:
+        cursor.execute("ALTER TABLE spreadsheet_sources ADD COLUMN source_type TEXT DEFAULT 'google_sheets'")
+    if 'total_worksheets' not in source_cols:
+        cursor.execute("ALTER TABLE spreadsheet_sources ADD COLUMN total_worksheets INTEGER DEFAULT 0")
+    if 'total_records' not in source_cols:
+        cursor.execute("ALTER TABLE spreadsheet_sources ADD COLUMN total_records INTEGER DEFAULT 0")
+    if 'last_analyzed_at' not in source_cols:
+        cursor.execute("ALTER TABLE spreadsheet_sources ADD COLUMN last_analyzed_at TEXT")
+    if 'analysis_status' not in source_cols:
+        cursor.execute("ALTER TABLE spreadsheet_sources ADD COLUMN analysis_status TEXT DEFAULT 'idle'")
+
+    # New Intelligence Table: Worksheet Metadata
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS worksheet_metadata (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id TEXT NOT NULL,
+            sheet_name TEXT NOT NULL,
+            row_count INTEGER DEFAULT 0,
+            col_count INTEGER DEFAULT 0,
+            header_row INTEGER DEFAULT 1,
+            structure_type TEXT DEFAULT 'tabular',
+            classification TEXT DEFAULT 'unknown',
+            quality_score REAL DEFAULT 100.0,
+            analysis_status TEXT DEFAULT 'completed',
+            summary_json TEXT DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(source_id, sheet_name)
+        )
+    """)
+
+    # New Intelligence Table: Dynamic Column Metadata
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS dynamic_column_metadata (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id TEXT NOT NULL,
+            sheet_name TEXT NOT NULL,
+            column_index INTEGER NOT NULL,
+            original_col TEXT NOT NULL,
+            normalized_col TEXT NOT NULL,
+            inferred_role TEXT NOT NULL,
+            inferred_type TEXT DEFAULT 'text',
+            confidence REAL DEFAULT 0.5,
+            sample_values_json TEXT DEFAULT '[]',
+            stats_json TEXT DEFAULT '{}',
+            mapping_status TEXT DEFAULT 'auto', -- 'auto', 'approved', 'rejected', 'custom'
+            requires_review INTEGER DEFAULT 0,
+            reason TEXT DEFAULT '',
+            updated_at TEXT NOT NULL,
+            UNIQUE(source_id, sheet_name, column_index)
+        )
+    """)
+
+    # New Intelligence Table: Dynamic Records (preserves ALL columns and literal values)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS dynamic_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id TEXT NOT NULL,
+            sheet_name TEXT NOT NULL,
+            row_index INTEGER NOT NULL,
+            raw_data_json TEXT NOT NULL,
+            inferred_data_json TEXT DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(source_id, sheet_name, row_index)
         )
     """)
 
@@ -224,10 +302,17 @@ def list_sources(include_disabled: bool = False) -> List[Dict[str, Any]]:
 
 
 def get_source(source_id: str) -> Optional[Dict[str, Any]]:
+    if not source_id:
+        return None
+    if source_id in ("default", "active"):
+        return get_active_source()
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM spreadsheet_sources WHERE source_id = ?", (source_id,))
     row = cursor.fetchone()
+    if not row and str(source_id).isdigit():
+        cursor.execute("SELECT * FROM spreadsheet_sources WHERE id = ?", (int(source_id),))
+        row = cursor.fetchone()
     conn.close()
     return dict(row) if row else None
 
@@ -637,3 +722,337 @@ def get_recent_sync_runs(source_id: Optional[str] = None, limit: int = 15) -> Li
     rows = cursor.fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ==========================================
+# DYNAMIC SPREADSHEET INTELLIGENCE ACCESS
+# ==========================================
+
+def update_source_intelligence_status(
+    source_id: str,
+    status: str,
+    last_analyzed: Optional[str] = None,
+    total_sheets: Optional[int] = None,
+    total_records: Optional[int] = None
+):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    cursor.execute("""
+        UPDATE spreadsheet_sources SET
+            analysis_status = ?,
+            last_analyzed_at = COALESCE(?, last_analyzed_at),
+            total_worksheets = COALESCE(?, total_worksheets),
+            total_records = COALESCE(?, total_records),
+            updated_at = ?
+        WHERE source_id = ?
+    """, (status, last_analyzed or now_iso, total_sheets, total_records, now_iso, source_id))
+    conn.commit()
+    conn.close()
+
+
+def save_worksheet_analysis(source_id: str, profile: Dict[str, Any]):
+    """Save or update worksheet metadata and dynamic column profiling."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    sheet_name = profile["sheet_name"]
+
+    cursor.execute("""
+        INSERT INTO worksheet_metadata (
+            source_id, sheet_name, row_count, col_count, header_row,
+            structure_type, classification, quality_score, analysis_status,
+            summary_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?)
+        ON CONFLICT(source_id, sheet_name) DO UPDATE SET
+            row_count = excluded.row_count,
+            col_count = excluded.col_count,
+            header_row = excluded.header_row,
+            structure_type = excluded.structure_type,
+            classification = excluded.classification,
+            quality_score = excluded.quality_score,
+            analysis_status = 'completed',
+            summary_json = excluded.summary_json,
+            updated_at = excluded.updated_at
+    """, (
+        source_id,
+        sheet_name,
+        profile.get("row_count", 0),
+        profile.get("column_count", 0),
+        profile.get("header_rows", [1])[0],
+        profile.get("structure_type", "tabular"),
+        profile.get("classification", "unknown"),
+        profile.get("quality_score", 100.0),
+        json.dumps({
+            "quality_issues": profile.get("quality_issues", []),
+            "duplicate_candidates": profile.get("duplicate_candidates", []),
+            "header_rows": profile.get("header_rows", [1]),
+            "data_start_row": profile.get("data_start_row", 2)
+        }),
+        now_iso,
+        now_iso
+    ))
+
+    # Save dynamic column metadata
+    for col in profile.get("columns", []):
+        col_idx = col["column_index"]
+        cursor.execute("""
+            INSERT INTO dynamic_column_metadata (
+                source_id, sheet_name, column_index, original_col, normalized_col,
+                inferred_role, inferred_type, confidence, sample_values_json,
+                stats_json, mapping_status, requires_review, reason, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_id, sheet_name, column_index) DO UPDATE SET
+                original_col = excluded.original_col,
+                normalized_col = excluded.normalized_col,
+                inferred_role = CASE WHEN mapping_status = 'approved' THEN inferred_role ELSE excluded.inferred_role END,
+                inferred_type = excluded.inferred_type,
+                confidence = excluded.confidence,
+                sample_values_json = excluded.sample_values_json,
+                stats_json = excluded.stats_json,
+                requires_review = CASE WHEN mapping_status = 'approved' THEN 0 ELSE excluded.requires_review END,
+                reason = excluded.reason,
+                updated_at = excluded.updated_at
+        """, (
+            source_id,
+            sheet_name,
+            col_idx,
+            col.get("original_name", f"Col_{col_idx+1}"),
+            col.get("normalized_name", f"col_{col_idx+1}"),
+            col.get("inferred_role", "unknown"),
+            col.get("data_type", "text"),
+            col.get("confidence", 0.5),
+            json.dumps(col.get("sample_values", [])),
+            json.dumps({
+                "populated_pct": col.get("populated_pct", 0),
+                "unique_count": col.get("unique_count", 0)
+            }),
+            col.get("mapping_status", "auto"),
+            col.get("requires_review", 0),
+            col.get("reason", ""),
+            now_iso
+        ))
+
+    conn.commit()
+    conn.close()
+
+
+def save_dynamic_records(source_id: str, sheet_name: str, headers: List[str], data_rows: List[List[Any]]):
+    """Save raw records preserving all columns and literal values (NA, -)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    # Clear old dynamic records for this sheet to ensure idempotent snapshot
+    cursor.execute("DELETE FROM dynamic_records WHERE source_id = ? AND sheet_name = ?", (source_id, sheet_name))
+
+    batch = []
+    for row_idx, r in enumerate(data_rows, start=1):
+        raw_dict = {}
+        for c_idx, h in enumerate(headers):
+            val = r[c_idx] if c_idx < len(r) else ""
+            raw_dict[h] = val
+
+        batch.append((
+            source_id,
+            sheet_name,
+            row_idx,
+            json.dumps(raw_dict, ensure_ascii=False),
+            "{}",
+            now_iso,
+            now_iso
+        ))
+
+    if batch:
+        cursor.executemany("""
+            INSERT INTO dynamic_records (
+                source_id, sheet_name, row_index, raw_data_json, inferred_data_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, batch)
+
+    conn.commit()
+    conn.close()
+
+
+def get_worksheet_metadata(source_id: str, sheet_name: Optional[str] = None) -> List[Dict[str, Any]]:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    if sheet_name:
+        cursor.execute("SELECT * FROM worksheet_metadata WHERE source_id = ? AND sheet_name = ?", (source_id, sheet_name))
+    else:
+        cursor.execute("SELECT * FROM worksheet_metadata WHERE source_id = ? ORDER BY sheet_name ASC", (source_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["summary"] = json.loads(d.get("summary_json") or "{}")
+        result.append(d)
+    return result
+
+
+def get_dynamic_columns(source_id: str, sheet_name: str) -> List[Dict[str, Any]]:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT * FROM dynamic_column_metadata
+        WHERE source_id = ? AND sheet_name = ?
+        ORDER BY column_index ASC
+    """, (source_id, sheet_name))
+    rows = cursor.fetchall()
+    conn.close()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["sample_values"] = json.loads(d.get("sample_values_json") or "[]")
+        d["stats"] = json.loads(d.get("stats_json") or "{}")
+        result.append(d)
+    return result
+
+
+def update_dynamic_column_mapping(
+    source_id: str,
+    sheet_name: str,
+    column_index: int,
+    inferred_role: str,
+    mapping_status: str = 'approved',
+    confidence: float = 1.0
+):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    cursor.execute("""
+        UPDATE dynamic_column_metadata SET
+            inferred_role = ?,
+            mapping_status = ?,
+            confidence = ?,
+            requires_review = 0,
+            updated_at = ?
+        WHERE source_id = ? AND sheet_name = ? AND column_index = ?
+    """, (inferred_role, mapping_status, confidence, now_iso, source_id, sheet_name, column_index))
+    conn.commit()
+    conn.close()
+
+
+def get_dynamic_records(
+    source_id: str,
+    sheet_name: str,
+    page: int = 1,
+    limit: int = 50,
+    search: str = ""
+) -> Dict[str, Any]:
+    """Retrieve raw/dynamic records with pagination and search across all fields."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    offset = (max(1, page) - 1) * limit
+
+    if search:
+        search_wild = f"%{search.strip().lower()}%"
+        cursor.execute("""
+            SELECT count(*) FROM dynamic_records
+            WHERE source_id = ? AND sheet_name = ? AND LOWER(raw_data_json) LIKE ?
+        """, (source_id, sheet_name, search_wild))
+        total = cursor.fetchone()[0]
+
+        cursor.execute("""
+            SELECT * FROM dynamic_records
+            WHERE source_id = ? AND sheet_name = ? AND LOWER(raw_data_json) LIKE ?
+            ORDER BY row_index ASC
+            LIMIT ? OFFSET ?
+        """, (source_id, sheet_name, search_wild, limit, offset))
+    else:
+        cursor.execute("""
+            SELECT count(*) FROM dynamic_records
+            WHERE source_id = ? AND sheet_name = ?
+        """, (source_id, sheet_name))
+        total = cursor.fetchone()[0]
+
+        cursor.execute("""
+            SELECT * FROM dynamic_records
+            WHERE source_id = ? AND sheet_name = ?
+            ORDER BY row_index ASC
+            LIMIT ? OFFSET ?
+        """, (source_id, sheet_name, limit, offset))
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    records = []
+    for r in rows:
+        d = dict(r)
+        d["raw_data"] = json.loads(d.get("raw_data_json") or "{}")
+        d["inferred_data"] = json.loads(d.get("inferred_data_json") or "{}")
+        records.append(d)
+
+    total_pages = math.ceil(total / limit) if limit > 0 else 1
+    return {
+        "records": records,
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "total_pages": total_pages
+    }
+
+
+def get_data_quality_report(source_id: str) -> Dict[str, Any]:
+    """Calculate comprehensive data quality statistics for a spreadsheet source."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    worksheets = get_worksheet_metadata(source_id)
+    total_sheets = len(worksheets)
+
+    cursor.execute("""
+        SELECT count(*) FROM dynamic_records WHERE source_id = ?
+    """, (source_id,))
+    total_rows = cursor.fetchone()[0]
+
+    cursor.execute("""
+        SELECT count(*) FROM dynamic_column_metadata WHERE source_id = ?
+    """, (source_id,))
+    total_cols = cursor.fetchone()[0]
+
+    cursor.execute("""
+        SELECT count(*) FROM dynamic_column_metadata
+        WHERE source_id = ? AND inferred_role != 'unknown'
+    """, (source_id,))
+    recognized_cols = cursor.fetchone()[0]
+
+    unknown_cols = max(0, total_cols - recognized_cols)
+
+    cursor.execute("""
+        SELECT count(*) FROM dynamic_column_metadata
+        WHERE source_id = ? AND requires_review = 1
+    """, (source_id,))
+    needs_review_cols = cursor.fetchone()[0]
+
+    conn.close()
+
+    # Aggregate duplicate candidates and issues
+    all_duplicates = []
+    all_issues = []
+    scores = []
+    for ws in worksheets:
+        scores.append(ws.get("quality_score", 100.0))
+        summary = ws.get("summary", {})
+        for d in summary.get("duplicate_candidates", []):
+            all_duplicates.append(f"{ws['sheet_name']}: {d}")
+        for iss in summary.get("quality_issues", []):
+            all_issues.append(f"[{ws['sheet_name']}] {iss}")
+
+    avg_score = round(sum(scores) / len(scores), 1) if scores else 100.0
+
+    return {
+        "source_id": source_id,
+        "total_worksheets": total_sheets,
+        "total_rows": total_rows,
+        "total_columns": total_cols,
+        "recognized_fields": recognized_cols,
+        "unknown_fields": unknown_cols,
+        "requires_review_count": needs_review_cols,
+        "overall_quality_score": avg_score,
+        "duplicate_candidates": all_duplicates[:25],
+        "quality_issues": all_issues
+    }
+

@@ -11,6 +11,7 @@ const Movements = lazy(() => import('./pages/Movements').then(({ Movements }) =>
 const Reports = lazy(() => import('./pages/Reports').then(({ Reports }) => ({ default: Reports })));
 const DataQuality = lazy(() => import('./pages/DataQuality').then(({ DataQuality }) => ({ default: DataQuality })));
 const SpreadsheetSources = lazy(() => import('./pages/SpreadsheetSources').then(({ SpreadsheetSources }) => ({ default: SpreadsheetSources })));
+const SpreadsheetIntelligence = lazy(() => import('./pages/SpreadsheetIntelligence').then(({ SpreadsheetIntelligence }) => ({ default: SpreadsheetIntelligence })));
 
 export function App() {
   const [currentTab, setCurrentTab] = useState('dashboard');
@@ -120,6 +121,9 @@ export function App() {
             {currentTab === 'quality' && <DataQuality refreshKey={syncStatus?.lastSuccess} />}
             {currentTab === 'sources' && (
               <SpreadsheetSources refreshKey={syncStatus?.lastSuccess} />
+            )}
+            {currentTab === 'intelligence' && (
+              <SpreadsheetIntelligence refreshKey={syncStatus?.lastSuccess} />
             )}
             {currentTab === 'sync' && (
               <SyncStatus

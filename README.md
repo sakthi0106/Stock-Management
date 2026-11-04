@@ -63,6 +63,28 @@ Open your browser at: **`http://localhost:5173`**
 
 ---
 
+## Dynamic Spreadsheet Intelligence & Universal Data Recognition
+
+The application includes an AI-assisted Dynamic Spreadsheet Intelligence System that automatically profiles and recognizes unfamiliar spreadsheets without requiring predefined worksheet names or fixed column mappings.
+
+### Capabilities:
+- **Universal Spreadsheet Reader (`backend/spreadsheet_reader.py`)**:
+  - Supports Excel (`.xlsx`, `.xls`) and connected Google Spreadsheets.
+  - Automatic header row detection with multi-row scoring, merged-cell propagation, and literal value preservation (`NA`, `-`).
+- **Intelligent Column Recognition & AI/ML Layer (`backend/intelligence_engine.py`)**:
+  - Semantic role inference: `product_id`, `description`, `category`, `uom`, `unit_price`, `opening_stock`, `in_qty`, `out_qty`, `closing_stock`, `date`, `unknown`.
+  - Confidence scoring, RapidFuzz / Difflib similarity matching, statistical type profiling, and suppression of row index / serial numbers.
+  - LLM Provider Abstraction (`GeminiProvider`, `OpenAIProvider`, `HeuristicMLProvider`) with high-accuracy offline fallback.
+  - Worksheet classification: `inventory_summary`, `stock_movement`, `price_catalog`, `reference_catalog`, `general_data`.
+- **Spreadsheet Intelligence UI (`frontend/src/pages/SpreadsheetIntelligence.tsx`)**:
+  - **Source Management**: Inspect analysis status, upload Excel workbooks, or trigger analysis on connected Google Sheets.
+  - **Worksheet Explorer**: Discover sheet dimensions, row counts, and data tables with preserved literal values.
+  - **Column Mapping Review**: Confidence pills, semantic role dropdowns, and manual role overrides.
+  - **Data Quality Dashboard**: Health scores, recognized vs unknown fields, missing headers, and duplicate candidate alerts.
+  - **1-Click Sync**: Merge approved mapped columns directly into the live inventory.
+
+---
+
 ## Running Automated Tests
 ```powershell
 cd backend

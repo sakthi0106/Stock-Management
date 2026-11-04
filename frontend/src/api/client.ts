@@ -1,4 +1,18 @@
-import { Product, Movement, SyncStatus, DashboardKPI, DataQualityReport, InventoryFilters, SpreadsheetSource, SheetInfo } from '../types';
+import {
+  Product,
+  Movement,
+  SyncStatus,
+  DashboardKPI,
+  DataQualityReport,
+  InventoryFilters,
+  SpreadsheetSource,
+  SheetInfo,
+  WorksheetMetadata,
+  DynamicColumn,
+  DynamicRecord,
+  IntelligenceDataQualityReport,
+  AnalysisTaskStatus,
+} from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
 
@@ -197,6 +211,108 @@ class ApiClient {
 
   async getDataQuality(source = 'active'): Promise<DataQualityReport> {
     return this.request<DataQualityReport>(`/data-quality?source=${encodeURIComponent(source)}`);
+  }
+
+  // ------------------------------------------------------------------ //
+  //  Spreadsheet Intelligence & Universal Data Recognition             //
+  // ------------------------------------------------------------------ //
+
+  async getIntelligenceSources(): Promise<{ sources: SpreadsheetSource[]; total: number }> {
+    return this.request<{ sources: SpreadsheetSource[]; total: number }>('/spreadsheet-intelligence/sources');
+  }
+
+  async triggerIntelligenceAnalysis(sourceId?: string): Promise<{ success: boolean; message: string; task_id?: string; source_id: string }> {
+    return this.request<{ success: boolean; message: string; task_id?: string; source_id: string }>('/spreadsheet-intelligence/analyze', {
+      method: 'POST',
+      body: JSON.stringify({ source_id: sourceId }),
+    });
+  }
+
+  async getIntelligenceTaskStatus(taskId: string): Promise<AnalysisTaskStatus> {
+    return this.request<AnalysisTaskStatus>(`/spreadsheet-intelligence/status/${encodeURIComponent(taskId)}`);
+  }
+
+  async uploadIntelligenceSpreadsheet(formData: FormData): Promise<{ success: boolean; message: string; source_id: string; task_id?: string }> {
+    const url = `${API_BASE_URL}/spreadsheet-intelligence/upload`;
+    const response = await fetch(url, {
+      method: 'POST',
+      body: formData,
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to upload spreadsheet');
+    }
+    return response.json();
+  }
+
+  async getIntelligenceWorksheets(sourceId: string): Promise<{ source_id: string; worksheets: WorksheetMetadata[]; total: number }> {
+    return this.request<{ source_id: string; worksheets: WorksheetMetadata[]; total: number }>(
+      `/spreadsheet-intelligence/sources/${encodeURIComponent(sourceId)}/worksheets`
+    );
+  }
+
+  async getIntelligenceWorksheetDetails(
+    sourceId: string,
+    sheetName: string
+  ): Promise<{ worksheet: WorksheetMetadata; columns: DynamicColumn[] }> {
+    return this.request<{ worksheet: WorksheetMetadata; columns: DynamicColumn[] }>(
+      `/spreadsheet-intelligence/sources/${encodeURIComponent(sourceId)}/worksheets/${encodeURIComponent(sheetName)}`
+    );
+  }
+
+  async getIntelligenceColumns(
+    sourceId: string,
+    sheetName: string
+  ): Promise<{ source_id: string; sheet_name: string; columns: DynamicColumn[]; total: number }> {
+    return this.request<{ source_id: string; sheet_name: string; columns: DynamicColumn[]; total: number }>(
+      `/spreadsheet-intelligence/sources/${encodeURIComponent(sourceId)}/worksheets/${encodeURIComponent(sheetName)}/columns`
+    );
+  }
+
+  async updateIntelligenceColumns(
+    sourceId: string,
+    sheetName: string,
+    columns: Partial<DynamicColumn>[]
+  ): Promise<{ success: boolean; message: string; columns: DynamicColumn[] }> {
+    return this.request<{ success: boolean; message: string; columns: DynamicColumn[] }>(
+      `/spreadsheet-intelligence/sources/${encodeURIComponent(sourceId)}/worksheets/${encodeURIComponent(sheetName)}/columns`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ columns }),
+      }
+    );
+  }
+
+  async getIntelligenceRecords(
+    sourceId: string,
+    sheetName: string,
+    page = 1,
+    limit = 50,
+    search = ''
+  ): Promise<{ records: DynamicRecord[]; total: number; page: number; limit: number; total_pages: number }> {
+    const params = new URLSearchParams({
+      page: String(page),
+      limit: String(limit),
+    });
+    if (search) params.append('search', search);
+    return this.request<{ records: DynamicRecord[]; total: number; page: number; limit: number; total_pages: number }>(
+      `/spreadsheet-intelligence/sources/${encodeURIComponent(sourceId)}/worksheets/${encodeURIComponent(sheetName)}/records?${params.toString()}`
+    );
+  }
+
+  async getIntelligenceDataQuality(sourceId: string): Promise<IntelligenceDataQualityReport> {
+    return this.request<IntelligenceDataQualityReport>(
+      `/spreadsheet-intelligence/sources/${encodeURIComponent(sourceId)}/data-quality`
+    );
+  }
+
+  async syncApprovedIntelligenceData(sourceId: string): Promise<{ success: boolean; message: string; imported_products: number; worksheets_count: number }> {
+    return this.request<{ success: boolean; message: string; imported_products: number; worksheets_count: number }>(
+      `/spreadsheet-intelligence/sources/${encodeURIComponent(sourceId)}/sync`,
+      {
+        method: 'POST',
+      }
+    );
   }
 }
 
