@@ -46,7 +46,8 @@ def create_app():
     return app
 
 
+app = create_app()
+
 if __name__ == '__main__':
-    app = create_app()
     logger.info(f"Starting Stock Management System on http://{Config.FLASK_HOST}:{Config.FLASK_PORT}...")
     app.run(host=Config.FLASK_HOST, port=Config.FLASK_PORT, debug=False)
