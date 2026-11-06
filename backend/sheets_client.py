@@ -44,12 +44,7 @@ class GoogleSheetsClient:
         self._cached_demo_metadata = None
         self.local_only = local_only
 
-        if local_only and not self.file_path:
-            # Explicit local_only test harness mode
-            sample_wb = Path(__file__).resolve().parent.parent / 'sample-data' / 'saravanan_actual_stock_master.xlsx'
-            if sample_wb.exists():
-                self.file_path = str(sample_wb)
-                self._is_local_file = True
+        # Strict no-sample-data rule: never bind to sample-data
 
         if not local_only and not self._is_local_file:
             self._init_service()
@@ -220,48 +215,6 @@ class GoogleSheetsClient:
             logger.error(f"Failed to read local excel batch: {e}")
             return self._get_all_demo_sheet_values(sheet_names)
 
-    def _ensure_demo_cache_loaded(self):
-        if self._cached_demo_values is not None:
-            return
-
-        wb_path = Path(__file__).resolve().parent.parent / 'sample-data' / 'saravanan_actual_stock_master.xlsx'
-        if not wb_path.exists():
-            self._cached_demo_values = {}
-            return
-
-        try:
-            import openpyxl
-            wb = openpyxl.load_workbook(str(wb_path), read_only=True, data_only=True)
-            cached = {}
-            sheets_meta = []
-            for idx, sname in enumerate(wb.sheetnames, start=1):
-                ws = wb[sname]
-                sheet_rows = []
-                for row in ws.iter_rows(values_only=True):
-                    if any(c is not None for c in row[:10]):
-                        sheet_rows.append([str(c) if c is not None else "" for c in row])
-                cached[sname] = sheet_rows
-                sheets_meta.append({
-                    "properties": {
-                        "sheetId": idx,
-                        "title": sname,
-                        "gridProperties": {
-                            "rowCount": len(sheet_rows),
-                            "columnCount": max((len(r) for r in sheet_rows), default=20)
-                        }
-                    }
-                })
-            wb.close()
-            self._cached_demo_values = cached
-            self._cached_demo_metadata = {
-                "properties": {"title": "Saravanan Electricals Master Stock Sheet"},
-                "sheets": sheets_meta
-            }
-            logger.info(f"Loaded and cached {len(cached)} sheets from local stock master.")
-        except Exception as e:
-            logger.error(f"Failed to load local stock master: {e}")
-            self._cached_demo_values = {}
-
     def _get_demo_metadata(self) -> Dict[str, Any]:
         self._ensure_demo_cache_loaded()
         if self._cached_demo_metadata:
@@ -278,18 +231,3 @@ class GoogleSheetsClient:
             ]
         }
 
-    def _get_demo_sheet_values(self, sheet_name: str) -> List[List[Any]]:
-        self._ensure_demo_cache_loaded()
-        if self._cached_demo_values and sheet_name in self._cached_demo_values:
-            return self._cached_demo_values[sheet_name]
-        return []
-
-    def _get_all_demo_sheet_values(self, sheet_names: List[str]) -> Dict[str, List[List[Any]]]:
-        self._ensure_demo_cache_loaded()
-        results = {}
-        for s in sheet_names:
-            if self._cached_demo_values and s in self._cached_demo_values:
-                results[s] = self._cached_demo_values.get(s, [])
-            else:
-                results[s] = []
-        return results

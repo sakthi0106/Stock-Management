@@ -63,33 +63,7 @@ class MultiSourceSyncService:
         # Explicit registration only: do not automatically inject unprovided/demo snapshots
 
     def _load_local_snapshot(self):
-        try:
-            local_client = GoogleSheetsClient(local_only=True)
-            active_src = database.get_active_source()
-            source_id = active_src['source_id'] if active_src else 'october-2026-master'
-            period = active_src.get('period', '') if active_src else '2026-10'
-
-            metadata = local_client.get_spreadsheet_metadata()
-            sheets_info = metadata.get('sheets', [])
-            sheet_names = [
-                s.get('properties', {}).get('title', '')
-                for s in sheets_info
-                if s.get('properties', {}).get('title')
-            ]
-
-            raw_data = local_client.get_batch_sheet_values(sheet_names)
-            analyzer = SheetAnalyzer(local_client)
-            analysis = analyzer.analyze_all_sheets(metadata=metadata, raw_values=raw_data, raw_formulas={sn: [] for sn in sheet_names})
-
-            srv = InventoryService(analysis_report=analysis, raw_sheets_data=raw_data, source_id=source_id, period=period)
-            self._local_state = SourceSyncState({'source_id': source_id, 'name': 'Local Snapshot', 'period': period}, local_client)
-            self._local_state.set_service(srv)
-            logger.info(f"Loaded local snapshot with {len(srv.products)} products and {len(srv.movements)} movements.")
-        except Exception as e:
-            logger.warning(f"Could not load local snapshot: {e}. Falling back to DB inventory.")
-            srv = InventoryService(source_id='default_source')
-            self._local_state = SourceSyncState({'source_id': 'default_source', 'name': 'Database Snapshot'}, None)
-            self._local_state.set_service(srv)
+        pass
 
     def _initialize_sources(self):
         with self._sources_lock:
