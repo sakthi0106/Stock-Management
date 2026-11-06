@@ -46,7 +46,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
         onChange={(e) => onFilterChange({ sheet: e.target.value, page: 1 })}
         className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-xs text-slate-800 focus:bg-white focus:outline-none focus:border-cyan-500"
       >
-        <option value="">All Worksheets (6 Sheets)</option>
+        <option value="">All Worksheets {sheets.length > 0 ? `(${sheets.length} Sheets)` : ""}</option>
         {sheets.map((s) => (
           <option key={s} value={s}>{s}</option>
         ))}

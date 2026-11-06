@@ -110,6 +110,8 @@ export interface SyncStatus {
   is_live_google_sheet: boolean;
   lastSuccess: string | null;
   lastError: string | null;
+  source?: string;
+  itemsSynced?: number;
   sheetsProcessed: number;
   sheets: SheetSyncStatus[];
 }

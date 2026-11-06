@@ -53,15 +53,19 @@ export const Topbar: React.FC<TopbarProps> = ({
           {isLive ? (
             <>
               <ShieldCheck size={14} className="text-emerald-600" />
-              <span className="text-slate-700 font-medium">Google Sheets Live</span>
+              <span className="text-slate-700 font-medium">{syncStatus?.source || "Google Sheets Live"}</span>
+            </>
+          ) : syncStatus?.source && syncStatus.source !== 'Primary Stock Sheet' && syncStatus.source !== 'Default Source' ? (
+            <>
+              <ShieldCheck size={14} className="text-cyan-600" />
+              <span className="text-slate-700 font-medium">{syncStatus.source}</span>
             </>
           ) : (
             <>
-              <AlertCircle size={14} className="text-amber-600" />
-              <span className="text-slate-700 font-medium">Local 6-Sheet Master</span>
+              <AlertCircle size={14} className="text-slate-400" />
+              <span className="text-slate-500 font-medium">No Spreadsheet Connected</span>
             </>
-          )}
-        </div>
+          )}        </div>
 
         {/* Last Sync Indicator */}
         <div className="hidden md:flex items-center gap-1.5 text-xs text-slate-500">

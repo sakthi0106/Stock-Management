@@ -140,7 +140,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         <div className="cursor-pointer" onClick={onNavigateToMovements}>
           <StatCard
             title="Daily Stock Movements"
-            value={data.total_movements_count || 927}
+            value={data.total_movements_count || 0}
             subtitle="Active daily Inward & Outward logs"
             icon={ArrowLeftRight}
             variant="emerald"
