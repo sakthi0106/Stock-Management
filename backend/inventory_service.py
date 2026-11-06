@@ -237,10 +237,18 @@ class InventoryService:
                 status = "Unknown"
 
             extra = {}
+            forbidden_field_keywords = [
+                'amount', 'closing value', 'closing stk val', 'total price',
+                'closing stk', 'closing stock', 'opening stock', 'column_', 'unnamed'
+            ]
             for c_i, val in enumerate(row):
-                h_name = headers[c_i] if c_i < len(headers) and headers[c_i] else f"Column_{c_i + 1}"
-                if not any(w in h_name.lower() for w in ['amount', 'closing value', 'closing stk val', 'total price']):
-                    extra[h_name] = parse_num_or_preserve(val)
+                raw_h = headers[c_i].strip() if c_i < len(headers) and headers[c_i] else ""
+                # Do NOT generate placeholder names like Column_1 or capture unnamed columns
+                if not raw_h:
+                    continue
+                lh = raw_h.lower()
+                if not any(w in lh for w in forbidden_field_keywords):
+                    extra[raw_h] = parse_num_or_preserve(val)
 
             prod = {
                 "source_id": self.source_id,

@@ -29,16 +29,18 @@ export const InventoryTable: React.FC<InventoryTableProps> = ({
       'closing stock', 'si no', 'sl no', 'product id', 'product_id'
     ];
     const keys = new Set<string>();
+    const forbidden = [
+      'amount', 'closing value', 'closing stk val', 'total price',
+      'column_', 'column ', 'in', 'out', 'closing stk', 'closing stock',
+      'opening stock', 'si no', 'sl no', 'sino', 'slno', 'unnamed'
+    ];
     products.forEach((p) => {
       if (p.extra_fields) {
         Object.keys(p.extra_fields).forEach((k) => {
           const lk = k.toLowerCase().trim();
           if (
-            !coreNames.some((c) => lk.includes(c)) &&
-            !lk.includes('amount') &&
-            !lk.includes('closing value') &&
-            !lk.includes('closing stk val') &&
-            !lk.includes('total price')
+            !coreNames.some((c) => lk === c || lk.includes(c)) &&
+            !forbidden.some((f) => lk === f || lk.startsWith(f) || lk.includes(f))
           ) {
             keys.add(k);
           }
@@ -52,12 +54,10 @@ export const InventoryTable: React.FC<InventoryTableProps> = ({
   const [selectedCols, setSelectedCols] = useState<string[]>([]);
   const [isColumnPickerOpen, setIsColumnPickerOpen] = useState(false);
 
-  // Initialize selected columns when new dynamic columns are discovered
+  // Clean up selected columns if they are no longer in dynamicColKeys
   React.useEffect(() => {
-    if (dynamicColKeys.length > 0 && selectedCols.length === 0) {
-      setSelectedCols(dynamicColKeys.slice(0, 3));
-    }
-  }, [dynamicColKeys, selectedCols.length]);
+    setSelectedCols((prev) => prev.filter((c) => dynamicColKeys.includes(c)));
+  }, [dynamicColKeys]);
 
   const toggleCol = (col: string) => {
     setSelectedCols((prev) =>
