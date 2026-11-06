@@ -100,13 +100,21 @@ export const Dashboard: React.FC<DashboardProps> = ({
         )}
       </div>
 
+      {data.total_products === 0 && (
+        <div className="p-6 bg-slate-50 border border-dashed border-slate-300 rounded-2xl text-center space-y-2">
+          <p className="text-sm font-semibold text-slate-800">
+            No spreadsheet uploaded or connected. Please upload or register a spreadsheet to get started.
+          </p>
+        </div>
+      )}
+
       {/* 4 Top KPI Stat Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="cursor-pointer" onClick={() => onNavigateToInventory()}>
           <StatCard
             title="Total Catalog Items"
             value={data.total_products}
-            subtitle="Across 6 inventory sheets"
+            subtitle="In active spreadsheet"
             icon={Package}
             variant="cyan"
           />

@@ -143,12 +143,7 @@ class InventoryService:
                     rows = cur.fetchall()
                     cur.execute("SELECT * FROM stock_movements WHERE source_id = ? ORDER BY date DESC, id DESC", (sid,))
                     m_rows = cur.fetchall()
-                if not rows:
-                    cur.execute("SELECT * FROM inventory_records LIMIT 2000")
-                    rows = cur.fetchall()
-                if not m_rows:
-                    cur.execute("SELECT * FROM stock_movements ORDER BY date DESC, id DESC LIMIT 2000")
-                    m_rows = cur.fetchall()
+                # Strict source isolation: never load records from other spreadsheets when the active/selected source has no data
 
             for r in rows:
                 p = dict(r)

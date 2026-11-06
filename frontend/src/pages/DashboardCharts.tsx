@@ -36,7 +36,7 @@ export const DashboardCharts: React.FC<DashboardChartsProps> = ({ data, onNaviga
               </div>
               <div>
                 <h3 className="text-sm font-bold text-slate-900">Daily Stock Movement Velocity (October 2026)</h3>
-                <p className="text-[11px] text-slate-500">Receipts (IN) vs Dispatches (OUT) recorded across all 6 worksheets</p>
+                <p className="text-[11px] text-slate-500">Receipts (IN) vs Dispatches (OUT) recorded across worksheets</p>
               </div>
             </div>
             <div className="flex items-center gap-3 text-xs bg-slate-50 px-3 py-1.5 rounded-xl border border-slate-200">

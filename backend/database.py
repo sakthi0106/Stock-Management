@@ -263,27 +263,8 @@ def init_db():
         )
     """)
 
-    # Seed default source if empty
-    cursor.execute("SELECT count(*) FROM spreadsheet_sources")
-    if cursor.fetchone()[0] == 0 and Config.GOOGLE_SHEETS_SPREADSHEET_ID:
-        default_sid = "default_source"
-        now_iso = datetime.now(timezone.utc).isoformat()
-        cursor.execute("""
-            INSERT INTO spreadsheet_sources (
-                source_id, name, spreadsheet_id, description, period, status, is_active,
-                poll_interval_seconds, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, 'active', 1, ?, ?, ?)
-        """, (
-            default_sid,
-            "Primary Stock Spreadsheet",
-            Config.GOOGLE_SHEETS_SPREADSHEET_ID,
-            "Default Google Sheets stock register",
-            "",
-            Config.SYNC_INTERVAL_SECONDS,
-            now_iso,
-            now_iso
-        ))
-        logger.info(f"Initialized default spreadsheet source: {Config.GOOGLE_SHEETS_SPREADSHEET_ID}")
+    # Explicit registration only: do not auto-seed sources
+    pass
 
     conn.commit()
     conn.close()
@@ -447,6 +428,9 @@ def delete_source(source_id: str) -> bool:
     cursor.execute("DELETE FROM spreadsheet_sheets WHERE source_id = ?", (source_id,))
     cursor.execute("DELETE FROM sheet_column_mappings WHERE source_id = ?", (source_id,))
     cursor.execute("DELETE FROM sync_history WHERE source_id = ?", (source_id,))
+    cursor.execute("DELETE FROM worksheet_metadata WHERE source_id = ?", (source_id,))
+    cursor.execute("DELETE FROM dynamic_column_metadata WHERE source_id = ?", (source_id,))
+    cursor.execute("DELETE FROM dynamic_records WHERE source_id = ?", (source_id,))
     cursor.execute("DELETE FROM spreadsheet_sources WHERE source_id = ?", (source_id,))
     conn.commit()
     conn.close()

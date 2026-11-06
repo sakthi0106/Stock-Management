@@ -60,7 +60,7 @@ class MultiSourceSyncService:
         self._instance_last_success: Optional[str] = None
 
         self._initialize_sources()
-        self._load_local_snapshot()
+        # Explicit registration only: do not automatically inject unprovided/demo snapshots
 
     def _load_local_snapshot(self):
         try:
@@ -285,9 +285,10 @@ class MultiSourceSyncService:
                     state = self._sources.get(sid)
                     if state and state.get_service():
                         return state.get_service()
-            if self._local_state and self._local_state.get_service():
-                return self._local_state.get_service()
-            return InventoryService(source_id="default_source")
+                # Load from database for active source
+                return InventoryService(source_id=sid)
+            # If no active source is registered, return an empty inventory service
+            return InventoryService(source_id="")
 
         if source_filter == "all":
             return self._get_combined_service()
@@ -297,8 +298,6 @@ class MultiSourceSyncService:
             if state and state.get_service():
                 return state.get_service()
 
-        if self._local_state and self._local_state.get_service():
-            return self._local_state.get_service()
         return InventoryService(source_id=source_filter)
 
     def _get_combined_service(self) -> InventoryService:
@@ -309,11 +308,6 @@ class MultiSourceSyncService:
                 if srv:
                     combined.products.extend(srv.products)
                     combined.movements.extend(srv.movements)
-        if not combined.products and self._local_state:
-            srv = self._local_state.get_service()
-            if srv:
-                combined.products.extend(srv.products)
-                combined.movements.extend(srv.movements)
         return combined
 
     def get_status(self) -> Dict[str, Any]:

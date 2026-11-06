@@ -63,7 +63,7 @@ export const DataQuality: React.FC<DataQualityProps> = ({ refreshKey }) => {
           {report.issues.length === 0 ? (
             <div className="py-8 text-center text-xs text-slate-600 flex flex-col items-center gap-2">
               <CheckCircle2 size={32} className="text-emerald-500" />
-              <span>All 6 worksheets adhere to strict schema rules with zero validation warnings.</span>
+              <span>All worksheets adhere to strict schema rules with zero validation warnings.</span>
             </div>
           ) : (
             report.issues.map((iss, idx) => (

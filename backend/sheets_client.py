@@ -42,6 +42,14 @@ class GoogleSheetsClient:
         self._last_error = None
         self._cached_demo_values = None
         self._cached_demo_metadata = None
+        self.local_only = local_only
+
+        if local_only and not self.file_path:
+            # Explicit local_only test harness mode
+            sample_wb = Path(__file__).resolve().parent.parent / 'sample-data' / 'saravanan_actual_stock_master.xlsx'
+            if sample_wb.exists():
+                self.file_path = str(sample_wb)
+                self._is_local_file = True
 
         if not local_only and not self._is_local_file:
             self._init_service()
@@ -92,8 +100,6 @@ class GoogleSheetsClient:
         is_default_master = (self.spreadsheet_id == Config.GOOGLE_SHEETS_SPREADSHEET_ID)
 
         if not self._is_configured or not self._service:
-            if is_default_master:
-                return self._get_demo_metadata()
             raise ValueError(f"Google Sheets client is not configured: {self._last_error}")
 
         for attempt in range(max_retries):
@@ -107,17 +113,12 @@ class GoogleSheetsClient:
                 err_str = str(e)
                 if "403" in err_str or "PERMISSION_DENIED" in err_str:
                     logger.error(f"Permission denied for sheet {self.spreadsheet_id}: {e}")
-                    if is_default_master:
-                        return self._get_demo_metadata()
                     raise
                 if attempt == max_retries - 1:
-                    if is_default_master:
-                        logger.warning(f"Could not reach Google Sheets: {e}. Using demo metadata.")
-                        return self._get_demo_metadata()
                     raise
                 time.sleep(1.0 * (attempt + 1))
 
-        return self._get_demo_metadata()
+        raise ValueError(f"Failed to fetch metadata for spreadsheet {self.spreadsheet_id}")
 
     def get_batch_sheet_values(self, sheet_names: List[str], render_option: str = "FORMATTED_VALUE") -> Dict[str, List[List[Any]]]:
         if self._is_local_file and self.file_path:
@@ -126,8 +127,6 @@ class GoogleSheetsClient:
         is_default_master = (self.spreadsheet_id == Config.GOOGLE_SHEETS_SPREADSHEET_ID)
 
         if not self._is_configured or not self._service:
-            if is_default_master:
-                return self._get_all_demo_sheet_values(sheet_names)
             raise ValueError(f"Google Sheets client is not configured: {self._last_error}")
 
         ranges = [f"'{s}'!A1:ZZ" for s in sheet_names]
@@ -145,10 +144,8 @@ class GoogleSheetsClient:
                 out[sname] = vr.get('values', [])
             return out
         except Exception as e:
-            if not is_default_master:
-                raise
-            logger.warning(f"Google Sheets batch read failed: {e}. Falling back to demo data.")
-            return self._get_all_demo_sheet_values(sheet_names)
+            logger.error(f"Google Sheets batch read failed: {e}")
+            raise
 
     def get_sheet_values(self, sheet_name: str, render_option: str = "FORMATTED_VALUE") -> List[List[Any]]:
         if self._is_local_file and self.file_path:
@@ -158,7 +155,7 @@ class GoogleSheetsClient:
         is_default_master = (self.spreadsheet_id == Config.GOOGLE_SHEETS_SPREADSHEET_ID)
 
         if not self._is_configured or not self._service:
-            return self._get_demo_sheet_values(sheet_name)
+            raise ValueError(f"Google Sheets client is not configured: {self._last_error}")
 
         range_name = f"'{sheet_name}'!A1:ZZ"
         try:
@@ -170,10 +167,8 @@ class GoogleSheetsClient:
             ).execute()
             return result.get('values', [])
         except Exception as e:
-            if not is_default_master:
-                raise
-            logger.warning(f"Google Sheets read warning for '{sheet_name}': {e}")
-            return self._get_demo_sheet_values(sheet_name)
+            logger.error(f"Google Sheets read error for '{sheet_name}': {e}")
+            raise
 
     def get_batch_sheet_formulas(self, sheet_names: List[str]) -> Dict[str, List[List[Any]]]:
         return self.get_batch_sheet_values(sheet_names, render_option="FORMULA")
@@ -202,7 +197,7 @@ class GoogleSheetsClient:
             return {"properties": {"title": Path(file_path).stem}, "sheets": sheets_meta}
         except Exception as e:
             logger.error(f"Failed to read local excel metadata: {e}")
-            return self._get_demo_metadata()
+            raise ValueError(f"Failed to fetch metadata for spreadsheet {self.spreadsheet_id}")
 
     def _load_excel_batch_values(self, file_path: str, sheet_names: List[str]) -> Dict[str, List[List[Any]]]:
         try:

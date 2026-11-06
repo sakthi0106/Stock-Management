@@ -48,7 +48,7 @@ export const Inventory: React.FC<InventoryPageProps> = ({
         <div>
           <h1 className="text-xl font-bold text-slate-900 tracking-tight">Stock Master Register</h1>
           <p className="text-xs text-slate-500 mt-0.5">
-            Showing {products.length} of {total} products across all 6 worksheets
+            Showing {products.length} of {total} products{sheets.length > 0 ? ` across ${sheets.length} worksheet${sheets.length > 1 ? 's' : ''}` : ''}
           </p>
         </div>
 
@@ -92,6 +92,14 @@ export const Inventory: React.FC<InventoryPageProps> = ({
         sheets={sheets}
         uoms={uoms}
       />
+
+      {total === 0 && !loading && (
+        <div className="p-8 bg-slate-50 border border-dashed border-slate-300 rounded-2xl text-center space-y-2">
+          <p className="text-sm font-medium text-slate-700">
+            No spreadsheet uploaded or connected. Please upload or register a spreadsheet to get started.
+          </p>
+        </div>
+      )}
 
       {/* Content: Table or Cards */}
       {viewMode === 'table' ? (

@@ -57,7 +57,9 @@ def health():
 def get_sheets():
     source = request.args.get('source', 'active').strip()
     active_src = database.get_active_source()
-    sid = active_src['source_id'] if source == 'active' and active_src else source
+    sid = active_src['source_id'] if source == 'active' and active_src else (source if source != 'active' else None)
+    if not sid:
+        return jsonify({"source_id": "", "sheets": [], "total": 0})
     sheets = database.get_sheets_for_source(sid)
     return jsonify({"source_id": sid, "sheets": sheets, "total": len(sheets)})
 
@@ -127,6 +129,11 @@ def upload_source():
         status='active',
         is_active=True
     )
+    conn = database.get_db_connection()
+    conn.execute("UPDATE spreadsheet_sources SET source_type = 'excel_upload' WHERE source_id = ?", (new_src['source_id'],))
+    conn.commit()
+    conn.close()
+    new_src['source_type'] = 'excel_upload'
     sync_service.register_source(new_src)
     ok, sync_res = sync_service.sync_source(new_src['source_id'], force=True)
 
