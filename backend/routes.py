@@ -436,6 +436,9 @@ def _run_source_analysis(source_id: str, task_id: Optional[str] = None):
         total_sheets = len(sheets)
         total_records = 0
 
+        # Purge any deleted worksheets that no longer exist in the workbook
+        database.cleanup_deleted_worksheets(real_source_id, set(sheets.keys()))
+
         for s_idx, (sheet_name, sdata) in enumerate(sheets.items(), start=1):
             if task_id:
                 analysis_tasks[task_id]["progress"] = f"Analyzing worksheet {s_idx}/{total_sheets}: {sheet_name}"

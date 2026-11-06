@@ -70,6 +70,7 @@ class SheetAnalyzer:
         return {
             "spreadsheet_title": metadata.get('properties', {}).get('title', 'Untitled Spreadsheet'),
             "total_sheets": len(analyzed_sheets),
+            "sheets_count": len(analyzed_sheets),
             "sheets": analyzed_sheets
         }
 
@@ -120,6 +121,8 @@ class SheetAnalyzer:
         result["data_start_row"] = header_row_idx + 2
 
         headers = [str(c).strip() if c is not None else "" for c in values[header_row_idx]]
+        while len(headers) < total_cols:
+            headers.append(f"Column_{len(headers) + 1}")
         result["headers"] = headers
 
         data_rows = values[result["data_start_row"] - 1:]
@@ -174,5 +177,14 @@ class SheetAnalyzer:
             if duplicates:
                 result["issues"].append(f"Duplicate product keys found in column '{pk_col}': {list(duplicates)[:5]}")
             result["sample_keys"] = keys[:5]
+
+        # Collect special literal values (NA, -, etc.)
+        special_vals = set()
+        for r in data_rows:
+            for c in r:
+                c_str = str(c).strip() if c is not None else ""
+                if c_str in SPECIAL_LITERALS:
+                    special_vals.add(c_str)
+        result["special_values"] = list(special_vals)
 
         return result

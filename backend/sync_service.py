@@ -57,6 +57,7 @@ class MultiSourceSyncService:
         self._poller_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._local_state: Optional[SourceSyncState] = None
+        self._instance_last_success: Optional[str] = None
 
         self._initialize_sources()
         self._load_local_snapshot()
@@ -95,7 +96,7 @@ class MultiSourceSyncService:
             sources = database.list_sources(include_disabled=False)
             for s in sources:
                 sid = s['source_id']
-                client = self.default_client if s.get('is_active') and self.default_client.spreadsheet_id == s.get('spreadsheet_id') else None
+                client = self.default_client if s.get('is_active') and getattr(self.default_client, 'spreadsheet_id', '') == s.get('spreadsheet_id') else None
                 self._sources[sid] = SourceSyncState(s, client)
 
     def start_background_poller(self):
@@ -194,6 +195,40 @@ class MultiSourceSyncService:
                 fingerprint=fingerprint
             )
 
+            # Automatically synchronize Dynamic Spreadsheet Intelligence (columns, rows, schemas)
+            try:
+                from spreadsheet_reader import UniversalSpreadsheetReader
+                from intelligence_engine import IntelligenceEngine
+                intel_engine = IntelligenceEngine()
+
+                database.cleanup_deleted_worksheets(source_id, set(raw_data.keys()))
+
+                total_intel_records = 0
+                for sname, s_values in raw_data.items():
+                    if not s_values:
+                        continue
+                    h_rows, headers, d_start = UniversalSpreadsheetReader.detect_header_rows(s_values)
+                    profile = intel_engine.profile_worksheet(
+                        sheet_name=sname,
+                        values=s_values,
+                        header_rows=h_rows,
+                        headers=headers,
+                        data_start_row=d_start
+                    )
+                    database.save_worksheet_analysis(source_id, profile)
+                    data_rows = s_values[d_start - 1:] if len(s_values) >= d_start else []
+                    database.save_dynamic_records(source_id, sname, headers, data_rows)
+                    total_intel_records += len(data_rows)
+
+                database.update_source_intelligence_status(
+                    source_id,
+                    status="completed",
+                    total_sheets=len(raw_data),
+                    total_records=total_intel_records
+                )
+            except Exception as e_intel:
+                logger.warning(f"Dynamic intelligence synchronization warning for '{source_id}': {e_intel}")
+
             database.record_sync_run(
                 status="success",
                 sheets_processed=len(analysis.get('sheets', {})),
@@ -208,6 +243,7 @@ class MultiSourceSyncService:
             state._last_sync_time = datetime.now(timezone.utc).isoformat()
             state._last_sync_status = "success"
             state._last_sync_error = None
+            self._instance_last_success = state._last_sync_time
 
             return True, {
                 "status": "success",
@@ -309,7 +345,7 @@ class MultiSourceSyncService:
         return {
             "state": "connected" if is_live else "demo",
             "is_live_google_sheet": is_live,
-            "lastSuccess": active_src.get('last_sync_at') if active_src else None,
+            "lastSuccess": self._instance_last_success,
             "lastError": active_src.get('last_sync_error') if active_src else None,
             "source": active_src.get('name', 'Default Source') if active_src else "Primary Stock Sheet",
             "itemsSynced": len(srv.products) if srv else 0,

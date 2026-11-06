@@ -793,7 +793,9 @@ def save_worksheet_analysis(source_id: str, profile: Dict[str, Any]):
         now_iso
     ))
 
-    # Save dynamic column metadata
+    # Save dynamic column metadata: purge old columns first so deleted columns are removed
+    cursor.execute("DELETE FROM dynamic_column_metadata WHERE source_id = ? AND sheet_name = ?", (source_id, sheet_name))
+
     for col in profile.get("columns", []):
         col_idx = col["column_index"]
         cursor.execute("""
@@ -802,17 +804,6 @@ def save_worksheet_analysis(source_id: str, profile: Dict[str, Any]):
                 inferred_role, inferred_type, confidence, sample_values_json,
                 stats_json, mapping_status, requires_review, reason, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(source_id, sheet_name, column_index) DO UPDATE SET
-                original_col = excluded.original_col,
-                normalized_col = excluded.normalized_col,
-                inferred_role = CASE WHEN mapping_status = 'approved' THEN inferred_role ELSE excluded.inferred_role END,
-                inferred_type = excluded.inferred_type,
-                confidence = excluded.confidence,
-                sample_values_json = excluded.sample_values_json,
-                stats_json = excluded.stats_json,
-                requires_review = CASE WHEN mapping_status = 'approved' THEN 0 ELSE excluded.requires_review END,
-                reason = excluded.reason,
-                updated_at = excluded.updated_at
         """, (
             source_id,
             sheet_name,
@@ -833,6 +824,23 @@ def save_worksheet_analysis(source_id: str, profile: Dict[str, Any]):
             now_iso
         ))
 
+    conn.commit()
+    conn.close()
+
+
+def cleanup_deleted_worksheets(source_id: str, active_sheet_names: set):
+    """Purge metadata, columns, records, and inventory for worksheets that no longer exist."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT sheet_name FROM worksheet_metadata WHERE source_id = ?", (source_id,))
+    db_sheets = {row["sheet_name"] for row in cursor.fetchall()}
+    deleted_sheets = db_sheets - set(active_sheet_names)
+    for ds in deleted_sheets:
+        cursor.execute("DELETE FROM worksheet_metadata WHERE source_id = ? AND sheet_name = ?", (source_id, ds))
+        cursor.execute("DELETE FROM dynamic_column_metadata WHERE source_id = ? AND sheet_name = ?", (source_id, ds))
+        cursor.execute("DELETE FROM dynamic_records WHERE source_id = ? AND sheet_name = ?", (source_id, ds))
+        cursor.execute("DELETE FROM inventory_records WHERE source_id = ? AND source_sheet = ?", (source_id, ds))
+        cursor.execute("DELETE FROM spreadsheet_sheets WHERE source_id = ? AND sheet_name = ?", (source_id, ds))
     conn.commit()
     conn.close()
 

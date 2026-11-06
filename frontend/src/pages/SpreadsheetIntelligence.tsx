@@ -113,7 +113,7 @@ export const SpreadsheetIntelligence: React.FC<{ refreshKey?: any }> = ({ refres
       loadWorksheets(selectedSourceId);
       loadQualityReport(selectedSourceId);
     }
-  }, [selectedSourceId, loadWorksheets]);
+  }, [selectedSourceId, loadWorksheets, refreshKey]);
 
   // Load Columns and Records when selected worksheet changes
   const loadSheetDetails = useCallback(async () => {
@@ -136,7 +136,7 @@ export const SpreadsheetIntelligence: React.FC<{ refreshKey?: any }> = ({ refres
     if (selectedSourceId && selectedSheetName) {
       loadSheetDetails();
     }
-  }, [selectedSourceId, selectedSheetName, page, limit, searchQuery, loadSheetDetails]);
+  }, [selectedSourceId, selectedSheetName, page, limit, searchQuery, loadSheetDetails, refreshKey]);
 
   // Load Quality Report
   const loadQualityReport = async (sourceId: string) => {
@@ -628,19 +628,31 @@ export const SpreadsheetIntelligence: React.FC<{ refreshKey?: any }> = ({ refres
                 </p>
               </div>
 
-              {/* Search Bar */}
-              <div className="relative min-w-[280px]">
-                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
-                <input
-                  type="text"
-                  placeholder="Search across all columns..."
-                  value={searchQuery}
-                  onChange={(e) => {
-                    setSearchQuery(e.target.value);
-                    setPage(1);
-                  }}
-                  className="w-full pl-9 pr-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-hidden focus:ring-2 focus:ring-cyan-500"
-                />
+              {/* Actions & Search Bar */}
+              <div className="flex items-center gap-2.5">
+                <button
+                  onClick={handleTriggerAnalysis}
+                  disabled={analyzing}
+                  className="px-3 py-2 text-xs font-semibold bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 rounded-xl shadow-2xs flex items-center gap-1.5 transition-all disabled:opacity-50"
+                  title="Re-analyze rows and columns for this sheet"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 text-cyan-600 ${analyzing ? 'animate-spin' : ''}`} />
+                  <span className="hidden sm:inline">Re-Analyze Sheet</span>
+                </button>
+
+                <div className="relative min-w-[240px]">
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                  <input
+                    type="text"
+                    placeholder="Search across all columns..."
+                    value={searchQuery}
+                    onChange={(e) => {
+                      setSearchQuery(e.target.value);
+                      setPage(1);
+                    }}
+                    className="w-full pl-9 pr-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-hidden focus:ring-2 focus:ring-cyan-500"
+                  />
+                </div>
               </div>
             </div>
           )}

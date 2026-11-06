@@ -189,9 +189,9 @@ class UniversalSpreadsheetReader:
                 header_rows.append(best_row_idx + 2)
                 data_start_row = best_row_idx + 3
 
-        # Combine headers if multi-row
+        # Combine headers across rows, scanning ALL rows to ensure newly added columns are captured
         combined_headers = []
-        max_cols = max(len(values[r - 1]) for r in header_rows)
+        max_cols = max((len(r) for r in values), default=0)
 
         if len(header_rows) == 1:
             primary_row = values[header_rows[0] - 1]
@@ -200,8 +200,8 @@ class UniversalSpreadsheetReader:
                 combined_headers.append(val or f"Column_{col_i + 1}")
         else:
             # Multi-row: propagate top header across sub-headers if top header was merged/empty
-            top_row = values[header_rows[0] - 1]
-            sub_row = values[header_rows[1] - 1]
+            top_row = values[header_rows[0] - 1] if header_rows[0] - 1 < len(values) else []
+            sub_row = values[header_rows[1] - 1] if header_rows[1] - 1 < len(values) else []
             current_top = ""
             for col_i in range(max_cols):
                 top_val = str(top_row[col_i]).strip() if col_i < len(top_row) and top_row[col_i] is not None else ""

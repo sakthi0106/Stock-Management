@@ -18,7 +18,7 @@ def parse_num_or_preserve(val: Any) -> Union[float, int, str, None]:
         return None
     if val_str in SPECIAL_STRINGS:
         return val_str
-    cleaned = re.sub(r'[, ]', '', val_str)
+    cleaned = re.sub(r'[,\$ ]', '', val_str)
     cleaned = cleaned.replace('₹', '').replace('Rs.', '').replace('Rs', '')
     try:
         f = float(cleaned)
@@ -243,10 +243,9 @@ class InventoryService:
 
             extra = {}
             for c_i, val in enumerate(row):
-                if c_i < len(headers):
-                    h_name = headers[c_i]
-                    if h_name and not any(w in h_name.lower() for w in ['amount', 'closing value', 'closing stk val', 'total price']):
-                        extra[h_name] = parse_num_or_preserve(val)
+                h_name = headers[c_i] if c_i < len(headers) and headers[c_i] else f"Column_{c_i + 1}"
+                if not any(w in h_name.lower() for w in ['amount', 'closing value', 'closing stk val', 'total price']):
+                    extra[h_name] = parse_num_or_preserve(val)
 
             prod = {
                 "source_id": self.source_id,
