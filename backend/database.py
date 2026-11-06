@@ -303,9 +303,6 @@ def get_active_source() -> Optional[Dict[str, Any]]:
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM spreadsheet_sources WHERE is_active = 1 LIMIT 1")
     row = cursor.fetchone()
-    if not row:
-        cursor.execute("SELECT * FROM spreadsheet_sources WHERE status = 'active' ORDER BY updated_at DESC LIMIT 1")
-        row = cursor.fetchone()
     conn.close()
     return dict(row) if row else None
 

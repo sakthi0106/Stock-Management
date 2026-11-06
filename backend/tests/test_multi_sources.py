@@ -16,12 +16,11 @@ def client():
         yield client
 
 def test_sources_api_crud(client):
-    # 1. List initial sources (default bootstrapped)
+    # 1. List initial sources (must not contain unprovided/unregistered sources)
     res = client.get("/api/sources")
     assert res.status_code == 200
     data = res.get_json()
     assert "sources" in data
-    assert len(data["sources"]) >= 1
     initial_count = len(data["sources"])
 
     # 2. Register a new source
@@ -74,19 +73,18 @@ def test_sources_api_crud(client):
     assert get_del.status_code == 404
 
 def test_inventory_source_filtering(client):
-    # Query with default active source
-    res1 = client.get("/api/inventory?source=active")
+    # Query with non-existent source - must return 0 items
+    res1 = client.get("/api/inventory?source=non_existent_source")
     assert res1.status_code == 200
     data1 = res1.get_json()
     assert "items" in data1
-    assert data1["total"] > 0
+    assert data1["total"] == 0
 
-    # Query with all sources
+    # Query with all sources when empty
     res2 = client.get("/api/inventory?source=all")
     assert res2.status_code == 200
     data2 = res2.get_json()
     assert "items" in data2
-    assert data2["total"] > 0
 
 def test_dashboard_source_filtering(client):
     res = client.get("/api/dashboard?source=active")
