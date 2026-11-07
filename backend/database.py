@@ -397,6 +397,14 @@ def get_active_source() -> Optional[Dict[str, Any]]:
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM spreadsheet_sources WHERE is_active = 1 LIMIT 1")
     row = cursor.fetchone()
+    if not row:
+        # Fallback to the most recently updated active source
+        cursor.execute("SELECT * FROM spreadsheet_sources WHERE status = 'active' ORDER BY updated_at DESC, id DESC LIMIT 1")
+        row = cursor.fetchone()
+    if not row:
+        # Fallback to any registered spreadsheet source
+        cursor.execute("SELECT * FROM spreadsheet_sources ORDER BY updated_at DESC, id DESC LIMIT 1")
+        row = cursor.fetchone()
     conn.close()
     return dict(row) if row else None
 
@@ -422,6 +430,13 @@ def create_source(
 ) -> Dict[str, Any]:
     conn = get_db_connection()
     cursor = conn.cursor()
+
+    # If no active source currently exists, activate this source automatically
+    cursor.execute("SELECT COUNT(*) as c FROM spreadsheet_sources WHERE is_active = 1")
+    count_row = cursor.fetchone()
+    active_count = count_row['c'] if count_row and 'c' in count_row else (count_row[0] if count_row else 0)
+    if active_count == 0:
+        is_active = True
 
     sheet_id = extract_spreadsheet_id(spreadsheet_url_or_id)
     slug_base = re.sub(r'[^a-zA-Z0-9_]+', '_', name.strip().lower()).strip('_')
@@ -1181,3 +1196,121 @@ def get_data_quality_report(source_id: str) -> Dict[str, Any]:
         "duplicate_candidates": all_duplicates[:25],
         "quality_issues": all_issues
     }
+
+
+def get_stock_movements(
+    source_id: Optional[str] = None,
+    product_id: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    movement_type: Optional[str] = None,
+    limit: int = 5000
+) -> List[Dict[str, Any]]:
+    """Operational retrieval of validated stock movements directly from PostgreSQL/SQLite."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # Resolve 'active' source
+    sid = source_id
+    if sid == 'active':
+        act = get_active_source()
+        sid = act['source_id'] if act else None
+
+    query = "SELECT * FROM stock_movements"
+    conditions = []
+    params: List[Any] = []
+
+    if sid and sid != 'all':
+        conditions.append("source_id = ?")
+        params.append(sid)
+
+    if product_id:
+        conditions.append("(product_id = ? OR part_no = ?)")
+        params.extend([product_id, product_id])
+
+    if from_date:
+        conditions.append("date >= ?")
+        params.append(from_date)
+
+    if to_date:
+        conditions.append("date <= ?")
+        params.append(to_date)
+
+    if movement_type:
+        conditions.append("UPPER(movement_type) LIKE ?")
+        params.append(f"%{movement_type.strip().upper()}%")
+
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+
+    query += " ORDER BY date DESC, id DESC"
+    if limit > 0:
+        query += f" LIMIT {int(limit)}"
+
+    cursor.execute(query, tuple(params))
+    rows = cursor.fetchall()
+    conn.close()
+
+    results = []
+    for r in rows:
+        m = dict(r)
+        m["validation_flags"] = json.loads(m.get("validation_flags_json") or "[]")
+        results.append(m)
+    return results
+
+
+def get_inventory_records(
+    source_id: Optional[str] = None,
+    category: Optional[str] = None,
+    stock_status: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = 5000
+) -> List[Dict[str, Any]]:
+    """Operational retrieval of validated inventory records directly from PostgreSQL/SQLite."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    sid = source_id
+    if sid == 'active':
+        act = get_active_source()
+        sid = act['source_id'] if act else None
+
+    query = "SELECT * FROM inventory_records"
+    conditions = []
+    params: List[Any] = []
+
+    if sid and sid != 'all':
+        conditions.append("source_id = ?")
+        params.append(sid)
+
+    if category:
+        conditions.append("category = ?")
+        params.append(category)
+
+    if stock_status:
+        conditions.append("stock_status = ?")
+        params.append(stock_status)
+
+    if search:
+        s_term = f"%{search.strip().lower()}%"
+        conditions.append("(LOWER(part_no) LIKE ? OR LOWER(description) LIKE ? OR LOWER(product_id) LIKE ?)")
+        params.extend([s_term, s_term, s_term])
+
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+
+    query += " ORDER BY id ASC"
+    if limit > 0:
+        query += f" LIMIT {int(limit)}"
+
+    cursor.execute(query, tuple(params))
+    rows = cursor.fetchall()
+    conn.close()
+
+    results = []
+    for r in rows:
+        p = dict(r)
+        p["extra_fields"] = json.loads(p.get("extra_fields_json") or "{}")
+        p["validation_flags"] = json.loads(p.get("validation_flags_json") or "[]")
+        results.append(p)
+    return results

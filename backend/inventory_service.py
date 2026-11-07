@@ -112,8 +112,8 @@ class InventoryService:
 
             self.movements.sort(key=lambda m: (m.get('date', ''), m.get('source_sheet', ''), m.get('product_id', '')))
 
-        # If no products were built from raw_data, load snapshot from SQLite database
-        if not self.products:
+        # Ensure products and movements are populated from database if not built in-memory
+        if not self.products or not self.movements:
             self._load_from_db()
 
     def _load_from_db(self):
@@ -126,24 +126,29 @@ class InventoryService:
             m_rows = []
 
             if self.source_id == "all":
-                cur.execute("SELECT * FROM inventory_records")
-                rows = cur.fetchall()
-                cur.execute("SELECT * FROM stock_movements ORDER BY date DESC, id DESC LIMIT 2000")
-                m_rows = cur.fetchall()
+                if not self.products:
+                    cur.execute("SELECT * FROM inventory_records")
+                    rows = cur.fetchall()
+                if not self.movements:
+                    cur.execute("SELECT * FROM stock_movements ORDER BY date DESC, id DESC LIMIT 5000")
+                    m_rows = cur.fetchall()
             elif self.source_id and self.source_id not in ("active", "default_source"):
-                cur.execute("SELECT * FROM inventory_records WHERE source_id = ?", (self.source_id,))
-                rows = cur.fetchall()
-                cur.execute("SELECT * FROM stock_movements WHERE source_id = ? ORDER BY date DESC, id DESC", (self.source_id,))
-                m_rows = cur.fetchall()
+                if not self.products:
+                    cur.execute("SELECT * FROM inventory_records WHERE source_id = ?", (self.source_id,))
+                    rows = cur.fetchall()
+                if not self.movements:
+                    cur.execute("SELECT * FROM stock_movements WHERE source_id = ? ORDER BY date DESC, id DESC", (self.source_id,))
+                    m_rows = cur.fetchall()
             else:
                 active_src = database.get_active_source()
                 sid = active_src["source_id"] if active_src else None
                 if sid:
-                    cur.execute("SELECT * FROM inventory_records WHERE source_id = ?", (sid,))
-                    rows = cur.fetchall()
-                    cur.execute("SELECT * FROM stock_movements WHERE source_id = ? ORDER BY date DESC, id DESC", (sid,))
-                    m_rows = cur.fetchall()
-                # Strict source isolation: never load records from other spreadsheets when the active/selected source has no data
+                    if not self.products:
+                        cur.execute("SELECT * FROM inventory_records WHERE source_id = ?", (sid,))
+                        rows = cur.fetchall()
+                    if not self.movements:
+                        cur.execute("SELECT * FROM stock_movements WHERE source_id = ? ORDER BY date DESC, id DESC", (sid,))
+                        m_rows = cur.fetchall()
 
             for r in rows:
                 p = dict(r)
@@ -327,6 +332,8 @@ class InventoryService:
         to_date: Optional[str] = None,
         movement_type: Optional[str] = None
     ) -> List[Dict[str, Any]]:
+        if not self.movements:
+            self._load_from_db()
         res = self.movements
 
         if product_id:

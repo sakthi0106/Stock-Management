@@ -238,14 +238,24 @@ def get_inventory():
     sort_by = request.args.get('sort_by', 'product_id').strip()
     sort_order = request.args.get('sort_order', 'asc').strip().lower()
 
-    items = srv.get_products(
-        search=search,
-        sheet=sheet,
-        category=category,
-        part_no=part_no,
-        uom=uom,
-        status=status
-    )
+    items = []
+    if srv:
+        items = srv.get_products(
+            search=search,
+            sheet=sheet,
+            category=category,
+            part_no=part_no,
+            uom=uom,
+            status=status
+        )
+
+    if not items:
+        items = database.get_inventory_records(
+            source_id=source,
+            category=category,
+            stock_status=status,
+            search=search
+        )
 
     # Sort
     def sort_key(p):
@@ -272,7 +282,7 @@ def get_inventory():
         sanitized_items.append(clean)
 
     # Extract distinct categories, sheets, uoms
-    all_prods = srv.products
+    all_prods = srv.products if (srv and srv.products) else items
     categories = sorted(list({p.get('category') for p in all_prods if p.get('category')}))
     sheets = sorted(list({p.get('source_sheet') for p in all_prods if p.get('source_sheet')}))
     uoms = sorted(list({p.get('uom') for p in all_prods if p.get('uom')}))
@@ -314,20 +324,30 @@ def get_product(product_id: str):
 @api_bp.route('/movements', methods=['GET'])
 def get_movements():
     srv, source = _get_service_for_request(request)
-    if not srv:
-        return jsonify({"error": "No inventory data available"}), 503
 
     product_id = request.args.get('product_id', '').strip() or None
     from_date = request.args.get('from_date', '').strip() or None
     to_date = request.args.get('to_date', '').strip() or None
     movement_type = request.args.get('movement_type', '').strip() or None
 
-    items = srv.get_movements(
-        product_id=product_id,
-        from_date=from_date,
-        to_date=to_date,
-        movement_type=movement_type
-    )
+    items = []
+    if srv:
+        items = srv.get_movements(
+            product_id=product_id,
+            from_date=from_date,
+            to_date=to_date,
+            movement_type=movement_type
+        )
+
+    # Fallback directly to PostgreSQL / SQLite operational movements table
+    if not items:
+        items = database.get_stock_movements(
+            source_id=source,
+            product_id=product_id,
+            from_date=from_date,
+            to_date=to_date,
+            movement_type=movement_type
+        )
 
     return jsonify({
         "items": items,
@@ -493,8 +513,16 @@ def _run_source_analysis(source_id: str, task_id: Optional[str] = None):
             raw_sheets_dict=raw_dict,
             period=src.get('period', '')
         )
+        active_src = database.get_active_source()
+        if not active_src or not active_src.get('is_active'):
+            database.set_active_source(real_source_id)
+
         if sync_service:
             sync_service.reload_sources()
+            srv = InventoryService(source_id=real_source_id, period=src.get('period', ''))
+            state = sync_service._sources.get(real_source_id)
+            if state:
+                state.set_service(srv)
 
         if task_id:
             analysis_tasks[task_id] = {
@@ -553,7 +581,7 @@ def intelligence_upload_spreadsheet():
         period=period,
         description=description,
         status="active",
-        is_active=False
+        is_active=True
     )
     source_id = new_src["source_id"]
 
@@ -562,6 +590,10 @@ def intelligence_upload_spreadsheet():
     conn.execute("UPDATE spreadsheet_sources SET source_type = 'excel_upload' WHERE source_id = ?", (source_id,))
     conn.commit()
     conn.close()
+    new_src["source_type"] = "excel_upload"
+
+    if sync_service:
+        sync_service.register_source(new_src)
 
     # Launch analysis in background thread so HTTP response never times out
     task_id = str(uuid.uuid4())

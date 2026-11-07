@@ -56,15 +56,42 @@ class UnifiedDataPipeline:
                 return int(f)
             return f
         except ValueError:
+            # Check for leading number with units (e.g. '10 NOS', '25.5 kg', '100 pcs')
+            m = re.match(r'^([0-9]+(?:\.[0-9]+)?)', cleaned)
+            if m:
+                try:
+                    f = float(m.group(1))
+                    return int(f) if f.is_integer() else f
+                except ValueError:
+                    pass
             return val_str
 
     @staticmethod
     def parse_date_string(val: Any) -> Optional[str]:
         if val is None:
             return None
+
+        # Support Excel serial dates (e.g. 35000 to 65000)
+        if isinstance(val, (int, float)) and 35000 <= val <= 65000:
+            try:
+                from datetime import datetime, timedelta
+                dt = datetime(1899, 12, 30) + timedelta(days=float(val))
+                return dt.strftime("%Y-%m-%d")
+            except Exception:
+                pass
+
         s = str(val).strip()
         if not s or s.upper() in SPECIAL_STRINGS:
             return None
+
+        # Check if string is a numeric excel serial date
+        if re.match(r'^\d{5}(?:\.\d+)?$', s):
+            try:
+                from datetime import datetime, timedelta
+                dt = datetime(1899, 12, 30) + timedelta(days=float(s))
+                return dt.strftime("%Y-%m-%d")
+            except Exception:
+                pass
 
         # Matches YYYY-MM-DD or YYYY/MM/DD or YYYY.MM.DD
         m1 = re.search(r'(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})', s)
@@ -72,11 +99,14 @@ class UnifiedDataPipeline:
             y, m, d = m1.groups()
             return f"{int(y):04d}-{int(m):02d}-{int(d):02d}"
 
-        # Matches DD-MM-YYYY or DD/MM/YYYY or DD.MM.YYYY
-        m2 = re.search(r'(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})', s)
+        # Matches DD-MM-YYYY or DD/MM/YYYY or DD.MM.YYYY (and DD-MM-YY)
+        m2 = re.search(r'(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})', s)
         if m2:
             d, m, y = m2.groups()
-            return f"{int(y):04d}-{int(m):02d}-{int(d):02d}"
+            y_num = int(y)
+            if y_num < 100:
+                y_num += 2000
+            return f"{y_num:04d}-{int(m):02d}-{int(d):02d}"
 
         # Matches DD-MMM, DD-MMM-YYYY, e.g. 01-Nov, 01-Nov-2026, 1-Oct
         m3 = re.search(r'(\d{1,2})[- ]([a-zA-Z]{3})(?:[- ](\d{2,4}))?', s)
@@ -275,6 +305,39 @@ class UnifiedDataPipeline:
                 party_col_name = h
                 break
 
+        # Fallback column discovery if role_to_col did not identify them
+        prod_col = role_to_col.get("product_id")
+        if not prod_col:
+            for h in headers:
+                hl = h.lower()
+                if any(k in hl for k in ['part no', 'part_no', 'item code', 'item no', 'item', 'product id', 'product code', 'material code', 'material id', 'sku', 'code', 'material']) and not any(w in hl for w in ['in', 'out', 'qty', 'stock', 'price', 'rate']):
+                    prod_col = h
+                    break
+
+        desc_col = role_to_col.get("description")
+        if not desc_col:
+            for h in headers:
+                hl = h.lower()
+                if any(k in hl for k in ['description', 'particulars', 'item name', 'material name', 'details', 'desc', 'name']) and not any(w in hl for w in ['in', 'out', 'qty', 'stock', 'price', 'rate']):
+                    desc_col = h
+                    break
+
+        uom_col = role_to_col.get("uom")
+        if not uom_col:
+            for h in headers:
+                hl = h.lower()
+                if any(k in hl for k in ['uom', 'unit', 'measure', 'units']) and not any(w in hl for w in ['price', 'rate', 'cost']):
+                    uom_col = h
+                    break
+
+        cat_col = role_to_col.get("category")
+        if not cat_col:
+            for h in headers:
+                hl = h.lower()
+                if any(k in hl for k in ['category', 'group', 'section', 'type', 'material type', 'dept']) and not any(w in hl for w in ['in', 'out', 'stock', 'movement']):
+                    cat_col = h
+                    break
+
         for row_idx, r in enumerate(data_rows, start=1):
             if not r or not any(str(c).strip() for c in r):
                 continue
@@ -285,19 +348,35 @@ class UnifiedDataPipeline:
                 raw_dict[h] = val
 
             # Semantic values
-            part_no = str(raw_dict.get(role_to_col.get("product_id", ""), "")).strip()
-            desc = str(raw_dict.get(role_to_col.get("description", ""), "")).strip()
-            cat = str(raw_dict.get(role_to_col.get("category", ""), "")).strip() or sheet_name
-            uom = str(raw_dict.get(role_to_col.get("uom", ""), "")).strip() or "NOS"
+            part_no = str(raw_dict.get(prod_col, "") if prod_col else "").strip()
+            desc = str(raw_dict.get(desc_col, "") if desc_col else "").strip()
+            cat = str(raw_dict.get(cat_col, "") if cat_col else "").strip() or sheet_name
+            uom = str(raw_dict.get(uom_col, "") if uom_col else "").strip() or "NOS"
             unit_price_raw = raw_dict.get(role_to_col.get("unit_price", ""), "NA")
             opening_raw = raw_dict.get(role_to_col.get("opening_stock", ""), 0)
             closing_raw = raw_dict.get(role_to_col.get("closing_stock", ""), None)
 
             # Skip header repeats, totals or blank rows
-            if not part_no and not desc:
-                continue
             if part_no.upper() in ["TOTAL", "SUBTOTAL", "GRAND TOTAL"]:
                 continue
+
+            # Fallbacks: if part_no is blank, use desc or item number; if desc is blank, use part_no
+            if not part_no and not desc:
+                # If there are valid quantities in the row, synthesize part_no instead of skipping
+                has_row_qty = False
+                for c_val in r:
+                    parsed = self.parse_number_or_preserve(c_val)
+                    if isinstance(parsed, (int, float)) and parsed > 0:
+                        has_row_qty = True
+                        break
+                if not has_row_qty:
+                    continue
+                part_no = f"ITEM-{row_idx}"
+                desc = f"{sheet_name} Item {row_idx}"
+            elif not part_no:
+                part_no = desc
+            elif not desc:
+                desc = part_no
 
             unit_price = self.parse_number_or_preserve(unit_price_raw) or "NA"
             opening_stock = self.parse_number_or_preserve(opening_raw) or 0
