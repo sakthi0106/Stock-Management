@@ -7,10 +7,11 @@ import openpyxl
 logger = logging.getLogger(__name__)
 
 DATE_PATTERNS = [
-    r'^\d{4}[-/]\d{1,2}[-/]\d{1,2}',
-    r'^\d{1,2}[-/]\d{1,2}[-/]\d{4}',
+    r'^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}',
+    r'^\d{1,2}[-/.]\d{1,2}[-/.]\d{4}',
     r'^\d{4}\.\d{1,2}\.\d{1,2}',
     r'^\d{1,2}\.\d{1,2}\.\d{4}',
+    r'^\d{1,2}[- ](?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)',
 ]
 
 SPECIAL_LITERALS = {'N/A', '-', 'NA', 'N.A.', 'nil', 'none', 'null'}
@@ -144,9 +145,9 @@ class UniversalSpreadsheetReader:
             headers = [str(c).strip() if c is not None else f"Col_{i+1}" for i, c in enumerate(values[0])]
             return ([1], headers, 2)
 
-        # Scan initial rows (up to 8 rows) to find header candidate
         max_scan = min(8, total_rows)
         row_scores = []
+        date_pattern = r'(\d{4}[-/.]\d{1,2}[-/.]\d{1,2})|(\d{1,2}[-/.]\d{1,2}[-/.]\d{4})|(\d{1,2})[- ](?:[a-zA-Z]{3})'
 
         for idx in range(max_scan):
             row = values[idx]
@@ -156,11 +157,9 @@ class UniversalSpreadsheetReader:
                 row_scores.append((idx, 0, 0, 0))
                 continue
 
-            # Check text vs numeric ratio: headers are mostly text strings, not floats
             text_count = 0
             for c in non_empty:
                 s = str(c).strip()
-                # Check if it parses as a float
                 try:
                     float(s.replace(',', ''))
                 except ValueError:
@@ -169,27 +168,46 @@ class UniversalSpreadsheetReader:
             text_ratio = text_count / non_empty_count if non_empty_count > 0 else 0
             unique_count = len(set(str(c).strip().lower() for c in non_empty))
 
-            # Composite score: high non_empty count, high text ratio, high unique count
-            score = (non_empty_count * 2.0) + (text_ratio * 5.0) + (unique_count * 1.5)
+            # Header rows have a high proportion of text labels over numeric quantities
+            score = (text_ratio * 35.0) + (text_count * 2.0) + (unique_count * 1.0)
             row_scores.append((idx, score, non_empty_count, text_ratio))
 
-        # Pick best scoring row as the primary header row
         best_row_idx = max(row_scores, key=lambda x: x[1])[0]
 
-        # Check for multi-row header (e.g. Row 1 has dates, Row 2 has IN / OUT)
+        # Multi-row header detection
         header_rows = [best_row_idx + 1]
         data_start_row = best_row_idx + 2
 
-        # Check if next row also looks like a sub-header (e.g. contains IN, OUT, QTY, UOM, or short labels)
-        if best_row_idx + 1 < total_rows:
+        # Check if preceding row contains date groupings (e.g. Row 0 has dates, Row 1 has column labels)
+        if best_row_idx > 0:
+            prev_row = values[best_row_idx - 1]
+            prev_dates = [c for c in prev_row if c is not None and re.search(date_pattern, str(c).strip())]
+            if len(prev_dates) >= 1:
+                header_rows = [best_row_idx, best_row_idx + 1]
+                data_start_row = best_row_idx + 2
+        elif best_row_idx + 1 < total_rows:
+            # Check if next row is a valid sub-header (must not be a data row!)
             next_row = values[best_row_idx + 1]
-            sub_header_indicators = {'in', 'out', 'qty', 'opening', 'closing', 'bal', 'uom', 'rate', 'unit', 'desc', 'amt'}
+            sub_header_indicators = {'in', 'out', 'qty', 'opening', 'closing', 'balance', 'uom', 'rate', 'unit price', 'unit cost', 'desc', 'amount'}
             next_non_empty = [str(c).strip().lower() for c in next_row if c is not None and str(c).strip() != ""]
-            if next_non_empty and any(ind in c for c in next_non_empty for ind in sub_header_indicators):
-                header_rows.append(best_row_idx + 2)
-                data_start_row = best_row_idx + 3
 
-        # Combine headers across rows, scanning ALL rows to ensure newly added columns are captured
+            # If next row contains dates or numeric data, it cannot be a sub-header
+            has_dates = any(re.search(date_pattern, c) for c in next_non_empty)
+            numeric_count = 0
+            for c in next_non_empty:
+                try:
+                    float(c.replace(',', ''))
+                    numeric_count += 1
+                except ValueError:
+                    pass
+            is_mostly_numeric = (numeric_count / len(next_non_empty) >= 0.15) if next_non_empty else False
+
+            if not has_dates and not is_mostly_numeric and next_non_empty:
+                term_matches = sum(1 for c in next_non_empty if any(re.search(r'\b' + re.escape(ind) + r'\b', c) for ind in sub_header_indicators))
+                if term_matches >= 2 or (term_matches >= 1 and len(next_non_empty) <= 3):
+                    header_rows = [best_row_idx + 1, best_row_idx + 2]
+                    data_start_row = best_row_idx + 3
+
         combined_headers = []
         max_cols = max((len(r) for r in values), default=0)
 
@@ -199,7 +217,6 @@ class UniversalSpreadsheetReader:
                 val = str(primary_row[col_i]).strip() if col_i < len(primary_row) and primary_row[col_i] is not None else ""
                 combined_headers.append(val or f"Column_{col_i + 1}")
         else:
-            # Multi-row: propagate top header across sub-headers if top header was merged/empty
             top_row = values[header_rows[0] - 1] if header_rows[0] - 1 < len(values) else []
             sub_row = values[header_rows[1] - 1] if header_rows[1] - 1 < len(values) else []
             current_top = ""
@@ -207,7 +224,9 @@ class UniversalSpreadsheetReader:
                 top_val = str(top_row[col_i]).strip() if col_i < len(top_row) and top_row[col_i] is not None else ""
                 sub_val = str(sub_row[col_i]).strip() if col_i < len(sub_row) and sub_row[col_i] is not None else ""
 
-                if top_val:
+                if top_val and re.search(date_pattern, top_val):
+                    current_top = top_val
+                elif top_val and not any(w in top_val.lower() for w in ['in', 'out', 'stock']):
                     current_top = top_val
 
                 if current_top and sub_val:
@@ -219,7 +238,6 @@ class UniversalSpreadsheetReader:
                 else:
                     combined_headers.append(f"Column_{col_i + 1}")
 
-        # Deduplicate headers if needed
         seen_headers: Dict[str, int] = {}
         unique_headers = []
         for h in combined_headers:
