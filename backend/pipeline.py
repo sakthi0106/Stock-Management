@@ -247,6 +247,35 @@ class UnifiedDataPipeline:
             elif is_out:
                 date_in_out_columns.append((c_idx, h, dt, 'OUT'))
 
+        # Check for repeating IN / OUT column pairs across multi-column registers (e.g. IN, OUT, IN_1, OUT_1... IN_30, OUT_30)
+        if not date_in_out_columns:
+            in_cols = []
+            out_cols = []
+            for c_idx, h in enumerate(headers):
+                hl = h.lower().strip()
+                base = re.sub(r'_\d+$', '', hl)
+                if any(k == base for k in ['in', 'inward', 'received', 'receipt', 'in qty', 'rec qty']) and not any(w in base for w in ['open', 'closing', 'out', 'balance']):
+                    in_cols.append((c_idx, h))
+                elif any(k == base for k in ['out', 'outward', 'issued', 'dispatch', 'out qty', 'iss qty']) and not any(w in base for w in ['open', 'closing', 'in', 'balance']):
+                    out_cols.append((c_idx, h))
+
+            if len(in_cols) > 1 or len(out_cols) > 1:
+                year_month = None
+                if period:
+                    m_ym = re.search(r'(\d{4})[-/.](\d{1,2})', period)
+                    if m_ym:
+                        year_month = f"{int(m_ym.group(1)):04d}-{int(m_ym.group(2)):02d}"
+                if not year_month:
+                    year_month = now_iso[:7]
+
+                for idx, (c_idx, h) in enumerate(in_cols, start=1):
+                    day_str = f"{year_month}-{idx:02d}"
+                    date_in_out_columns.append((c_idx, h, day_str, 'IN'))
+
+                for idx, (c_idx, h) in enumerate(out_cols, start=1):
+                    day_str = f"{year_month}-{idx:02d}"
+                    date_in_out_columns.append((c_idx, h, day_str, 'OUT'))
+
         # Check for Transaction-based columns (Structure B)
         # 1. Date column
         date_col_name = role_to_col.get("date")

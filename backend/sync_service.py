@@ -66,6 +66,21 @@ class MultiSourceSyncService:
     def _initialize_sources(self):
         with self._sources_lock:
             sources = database.list_sources(include_disabled=False)
+            if not sources and Config.GOOGLE_SHEETS_SPREADSHEET_ID:
+                try:
+                    default_src = database.create_source(
+                        name="Stock Data",
+                        spreadsheet_url_or_id=Config.GOOGLE_SHEETS_SPREADSHEET_ID,
+                        period="2026-10",
+                        description="Default Google Sheets Stock Register",
+                        status="active",
+                        is_active=True
+                    )
+                    sources = [default_src]
+                    logger.info(f"Auto-registered default Google Sheet source: {default_src['source_id']}")
+                except Exception as e:
+                    logger.warning(f"Could not auto-register default Google Sheet: {e}")
+
             for s in sources:
                 sid = s['source_id']
                 client = self.default_client if s.get('is_active') and getattr(self.default_client, 'spreadsheet_id', '') == s.get('spreadsheet_id') else None

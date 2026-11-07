@@ -132,8 +132,27 @@ class UniversalSpreadsheetReader:
             "sheets": sheets_data
         }
 
-    @staticmethod
-    def detect_header_rows(values: List[List[Any]]) -> Tuple[List[int], List[str], int]:
+    @classmethod
+    def is_date_like(cls, c: Any) -> bool:
+        if c is None:
+            return False
+        if isinstance(c, (int, float)):
+            if 35000 <= c <= 65000 or (1 <= c <= 31 and float(c).is_integer()):
+                return True
+        s = str(c).strip()
+        if not s or s.upper() in {'NA', 'N/A', '-', 'NONE', 'NULL', 'TOTAL', 'SUBTOTAL'}:
+            return False
+        pat = r'(\d{4}[-/.]\d{1,2}[-/.]\d{1,2})|(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})|(\d{1,2})[- ](?:[a-zA-Z]{3,9})(?:[- ]\d{2,4})?|(?:[a-zA-Z]{3,9})[- ]\d{1,2}'
+        if re.search(pat, s, re.IGNORECASE):
+            return True
+        if re.match(r'^\d{1,2}$', s) and 1 <= int(s) <= 31:
+            return True
+        if re.match(r'^\d{5}(?:\.\d+)?$', s):
+            return True
+        return False
+
+    @classmethod
+    def detect_header_rows(cls, values: List[List[Any]]) -> Tuple[List[int], List[str], int]:
         """Dynamically detect header rows (single or multi-row) and return:
         (header_row_indices_1_based, combined_headers, data_start_row_1_based).
         """
@@ -147,7 +166,6 @@ class UniversalSpreadsheetReader:
 
         max_scan = min(8, total_rows)
         row_scores = []
-        date_pattern = r'(\d{4}[-/.]\d{1,2}[-/.]\d{1,2})|(\d{1,2}[-/.]\d{1,2}[-/.]\d{4})|(\d{1,2})[- ](?:[a-zA-Z]{3})'
 
         for idx in range(max_scan):
             row = values[idx]
@@ -178,11 +196,12 @@ class UniversalSpreadsheetReader:
         header_rows = [best_row_idx + 1]
         data_start_row = best_row_idx + 2
 
-        # Check if preceding row contains date groupings (e.g. Row 0 has dates, Row 1 has column labels)
+        # Check if preceding row contains date groupings or section labels (e.g. Row 0 has dates, Row 1 has column labels)
         if best_row_idx > 0:
             prev_row = values[best_row_idx - 1]
-            prev_dates = [c for c in prev_row if c is not None and re.search(date_pattern, str(c).strip())]
-            if len(prev_dates) >= 1:
+            prev_dates = [c for c in prev_row if cls.is_date_like(c)]
+            # If previous row has dates OR if row 0 has non-empty headers and best_row_idx == 1
+            if len(prev_dates) >= 1 or best_row_idx == 1:
                 header_rows = [best_row_idx, best_row_idx + 1]
                 data_start_row = best_row_idx + 2
         elif best_row_idx + 1 < total_rows:
@@ -224,9 +243,7 @@ class UniversalSpreadsheetReader:
                 top_val = str(top_row[col_i]).strip() if col_i < len(top_row) and top_row[col_i] is not None else ""
                 sub_val = str(sub_row[col_i]).strip() if col_i < len(sub_row) and sub_row[col_i] is not None else ""
 
-                if top_val and re.search(date_pattern, top_val):
-                    current_top = top_val
-                elif top_val and not any(w in top_val.lower() for w in ['in', 'out', 'stock']):
+                if top_val and (cls.is_date_like(top_val) or not any(w in top_val.lower() for w in ['in', 'out', 'stock', 'qty'])):
                     current_top = top_val
 
                 if current_top and sub_val:

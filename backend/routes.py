@@ -744,133 +744,61 @@ def intelligence_get_data_quality(source_id):
 
 @api_bp.route('/spreadsheet-intelligence/sources/<source_id>/sync', methods=['POST'])
 def intelligence_sync_approved_data(source_id):
-    """Synchronize approved mapped columns into live inventory and stock movements tables."""
-    conn = None
+    """Synchronize approved mapped columns into live inventory and stock movements tables via UnifiedDataPipeline."""
     try:
         src = database.get_source(source_id)
-        real_id = src["source_id"] if src else source_id
-        worksheets = database.get_worksheet_metadata(real_id)
-        imported_products = 0
-        imported_movements = 0
+        if not src:
+            return jsonify({"error": "Source not found"}), 404
+        real_id = src["source_id"]
 
-        conn = database.get_db_connection()
-        cursor = conn.cursor()
-        now_iso = datetime.now(timezone.utc).isoformat()
+        from spreadsheet_reader import UniversalSpreadsheetReader
+        from pipeline import UnifiedDataPipeline
 
-        for ws in worksheets:
-            sname = ws["sheet_name"]
+        sheets_client = sync_service.default_client if sync_service and hasattr(sync_service, 'default_client') else None
+        reader = UniversalSpreadsheetReader(google_sheets_client=sheets_client)
+        spreadsheet_ref = src.get("spreadsheet_id", "")
 
-            # Query dynamic columns directly using current connection
-            cursor.execute("""
-                SELECT original_col, inferred_role FROM dynamic_column_metadata
-                WHERE source_id = ? AND sheet_name = ?
-            """, (real_id, sname))
-            col_rows = cursor.fetchall()
+        raw_data = {}
+        if src.get("source_type") == "excel_upload" or spreadsheet_ref.startswith("local_file:"):
+            file_path = spreadsheet_ref.replace("local_file:", "")
+            if not os.path.exists(file_path):
+                uploads_dir = os.path.join(os.path.dirname(__file__), "uploads")
+                possible = os.path.join(uploads_dir, os.path.basename(file_path))
+                if os.path.exists(possible):
+                    file_path = possible
+            excel_extracted = reader.extract_from_excel(file_path)
+            for sname, sinfo in excel_extracted.get("sheets", {}).items():
+                raw_data[sname] = sinfo.get("values", [])
+        else:
+            from sheets_client import GoogleSheetsClient
+            client = sheets_client or GoogleSheetsClient(spreadsheet_id=spreadsheet_ref)
+            metadata = client.get_spreadsheet_metadata()
+            sheets_info = metadata.get('sheets', [])
+            sheet_names = [s.get('properties', {}).get('title', '') for s in sheets_info if s.get('properties', {}).get('title')]
+            raw_data = client.get_batch_sheet_values(sheet_names)
 
-            # Map column names to semantic roles
-            role_to_col: Dict[str, str] = {}
-            for c in col_rows:
-                role = c["inferred_role"]
-                if role != "unknown" and role not in role_to_col:
-                    role_to_col[role] = c["original_col"]
-
-            # Read dynamic records
-            cursor.execute("SELECT row_index, raw_data_json FROM dynamic_records WHERE source_id = ? AND sheet_name = ?", (real_id, sname))
-            records = cursor.fetchall()
-
-            for r in records:
-                row_idx = r["row_index"]
-                raw_dict = json.loads(r["raw_data_json"] or "{}")
-
-                part_no = str(raw_dict.get(role_to_col.get("product_id", ""), "")).strip()
-                desc = str(raw_dict.get(role_to_col.get("description", ""), "")).strip()
-                cat = str(raw_dict.get(role_to_col.get("category", ""), "")).strip() or sname
-                uom = str(raw_dict.get(role_to_col.get("uom", ""), "")).strip() or "NOS"
-                unit_price = str(raw_dict.get(role_to_col.get("unit_price", ""), "")).strip()
-                opening = str(raw_dict.get(role_to_col.get("opening_stock", ""), "")).strip()
-                closing = str(raw_dict.get(role_to_col.get("closing_stock", ""), "")).strip()
-
-                if not part_no and not desc:
-                    continue
-
-                if part_no.upper() in ["TOTAL", "SUBTOTAL", "GRAND TOTAL"]:
-                    continue
-
-                prod_id = f"{real_id}-{sname}-{part_no or row_idx}"
-                # Derive status
-                try:
-                    c_num = float(closing.replace(',', ''))
-                    status = "In Stock" if c_num > 10 else "Low Stock" if c_num > 0 else "Out of Stock"
-                except Exception:
-                    status = "Unknown"
-
-                # Insert into inventory_records preserving raw values
-                cursor.execute("""
-                    INSERT INTO inventory_records (
-                        source_id, source_sheet, source_row, product_id, part_no, description,
-                        category, uom, unit_price, opening_stock, current_stock, latest_date,
-                        stock_status, period, extra_fields_json, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(source_id, source_sheet, source_row) DO UPDATE SET
-                        product_id = excluded.product_id,
-                        part_no = excluded.part_no,
-                        description = excluded.description,
-                        category = excluded.category,
-                        uom = excluded.uom,
-                        unit_price = excluded.unit_price,
-                        opening_stock = excluded.opening_stock,
-                        current_stock = excluded.current_stock,
-                        stock_status = excluded.stock_status,
-                        extra_fields_json = excluded.extra_fields_json,
-                        updated_at = excluded.updated_at
-                """, (
-                    real_id,
-                    sname,
-                    row_idx,
-                    prod_id,
-                    part_no or f"ITEM-{row_idx}",
-                    desc or part_no,
-                    cat,
-                    uom,
-                    unit_price,
-                    opening,
-                    closing or opening,
-                    now_iso[:10],
-                    status,
-                    "",
-                    json.dumps(raw_dict, ensure_ascii=False),
-                    now_iso
-                ))
-                imported_products += 1
-
-        conn.commit()
-        conn.close()
-
-        # Update sync history
-        database.record_sync_run(
-            status="success",
-            sheets_processed=len(worksheets),
-            products_count=imported_products,
-            movements_count=imported_movements,
-            fingerprint="",
+        pipeline = UnifiedDataPipeline()
+        pipeline_res = pipeline.process_and_persist(
             source_id=real_id,
-            source_name=src.get("name") if src else real_id
+            raw_sheets_dict=raw_data,
+            period=src.get('period', '')
         )
+
+        active_src = database.get_active_source()
+        if not active_src or not active_src.get('is_active'):
+            database.set_active_source(real_id)
+
+        if sync_service:
+            sync_service.reload_sources()
 
         return jsonify({
             "success": True,
-            "message": f"Successfully synchronized {imported_products} items from {len(worksheets)} worksheets.",
-            "imported_products": imported_products,
-            "worksheets_count": len(worksheets)
+            "message": f"Successfully synchronized {pipeline_res['total_inventory_records']} inventory items and {pipeline_res['total_stock_movements']} stock movements from {pipeline_res['total_sheets']} worksheets.",
+            "imported_products": pipeline_res['total_inventory_records'],
+            "imported_movements": pipeline_res['total_stock_movements'],
+            "worksheets_count": pipeline_res['total_sheets']
         })
-
     except Exception as e:
         logger.error(f"Intelligence sync failed for source {source_id}: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
-    finally:
-        if conn:
-            try:
-                conn.close()
-            except Exception:
-                pass
 
