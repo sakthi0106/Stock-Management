@@ -387,6 +387,18 @@ def trigger_refresh():
     return jsonify({"success": ok, "status": status})
 
 
+@api_bp.route('/sync/pause', methods=['POST'])
+def pause_sync():
+    sync_service.pause_sync()
+    return jsonify({"success": True, "message": "Automatic 15-second sync paused", "status": sync_service.get_status()})
+
+
+@api_bp.route('/sync/resume', methods=['POST'])
+def resume_sync():
+    sync_service.resume_sync()
+    return jsonify({"success": True, "message": "Automatic 15-second sync resumed", "status": sync_service.get_status()})
+
+
 @api_bp.route('/sync/history', methods=['GET'])
 def get_sync_history():
     source = request.args.get('source', None)
@@ -472,12 +484,17 @@ def _run_source_analysis(source_id: str, task_id: Optional[str] = None):
 
             total_records += len(data_rows)
 
-        database.update_source_intelligence_status(
-            real_source_id,
-            status="completed",
-            total_sheets=total_sheets,
-            total_records=total_records
+        # Automatically synchronize dynamic inventory records and movements
+        from pipeline import UnifiedDataPipeline
+        pipeline = UnifiedDataPipeline(intelligence_engine=intelligence_engine)
+        raw_dict = {sname: sdata.get('values', []) for sname, sdata in sheets.items()}
+        pipeline.process_and_persist(
+            source_id=real_source_id,
+            raw_sheets_dict=raw_dict,
+            period=src.get('period', '')
         )
+        if sync_service:
+            sync_service.reload_sources()
 
         if task_id:
             analysis_tasks[task_id] = {

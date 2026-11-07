@@ -1,3 +1,4 @@
+import os
 import re
 import math
 import sqlite3
@@ -9,12 +10,100 @@ from config import Config
 
 logger = logging.getLogger(__name__)
 
+# Determine active database engine: PostgreSQL (if DATABASE_URL is set) or SQLite (fallback)
+DB_ENGINE = "postgresql" if Config.DATABASE_URL and Config.DATABASE_URL.startswith("postgres") else "sqlite"
 
-def get_db_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(Config.DATABASE_PATH, timeout=30.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=30000")
-    return conn
+
+class UnifiedCursor:
+    """Cursor wrapper that transparently adapts SQL query syntax between SQLite and PostgreSQL."""
+    def __init__(self, raw_cursor, is_postgres: bool):
+        self._raw_cursor = raw_cursor
+        self.is_postgres = is_postgres
+
+    def _translate_query(self, query: str) -> str:
+        if not self.is_postgres:
+            return query
+        # Adapt ? to %s for PostgreSQL parameterized queries
+        # Preserve ?? or string literals
+        translated = query.replace('?', '%s')
+        # Translate INSERT OR REPLACE INTO ... (table) (cols) VALUES (...) to PostgreSQL ON CONFLICT
+        # Handled at call sites or table definitions
+        return translated
+
+    def execute(self, query: str, params: Optional[Union[tuple, list]] = None):
+        t_query = self._translate_query(query)
+        if params is not None:
+            return self._raw_cursor.execute(t_query, params)
+        return self._raw_cursor.execute(t_query)
+
+    def executemany(self, query: str, seq_of_params: List[Union[tuple, list]]):
+        t_query = self._translate_query(query)
+        return self._raw_cursor.executemany(t_query, seq_of_params)
+
+    def fetchone(self):
+        row = self._raw_cursor.fetchone()
+        if row is None:
+            return None
+        if hasattr(row, 'keys'):
+            return row
+        if isinstance(row, dict):
+            return row
+        return row
+
+    def fetchall(self):
+        return self._raw_cursor.fetchall()
+
+    @property
+    def rowcount(self):
+        return self._raw_cursor.rowcount
+
+    def close(self):
+        return self._raw_cursor.close()
+
+
+class UnifiedConnection:
+    """Connection wrapper ensuring identical behavior across PostgreSQL and SQLite."""
+    def __init__(self, raw_conn, is_postgres: bool):
+        self._raw_conn = raw_conn
+        self.is_postgres = is_postgres
+
+    def cursor(self):
+        return UnifiedCursor(self._raw_conn.cursor(), self.is_postgres)
+
+    def execute(self, query: str, params: Optional[Union[tuple, list]] = None):
+        cur = self.cursor()
+        cur.execute(query, params)
+        return cur
+
+    def commit(self):
+        return self._raw_conn.commit()
+
+    def rollback(self):
+        return self._raw_conn.rollback()
+
+    def close(self):
+        return self._raw_conn.close()
+
+
+def get_db_connection() -> UnifiedConnection:
+    """Connect to PostgreSQL (if configured in DATABASE_URL) or SQLite local database."""
+    global DB_ENGINE
+    if Config.DATABASE_URL and Config.DATABASE_URL.startswith("postgres"):
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
+            raw_conn = psycopg2.connect(Config.DATABASE_URL, cursor_factory=RealDictCursor)
+            DB_ENGINE = "postgresql"
+            return UnifiedConnection(raw_conn, is_postgres=True)
+        except Exception as e:
+            logger.warning(f"Could not connect to PostgreSQL via DATABASE_URL ({e}). Falling back to SQLite.")
+
+    # SQLite local engine
+    raw_conn = sqlite3.connect(Config.DATABASE_PATH, timeout=30.0)
+    raw_conn.row_factory = sqlite3.Row
+    raw_conn.execute("PRAGMA busy_timeout=30000")
+    DB_ENGINE = "sqlite"
+    return UnifiedConnection(raw_conn, is_postgres=False)
 
 
 def extract_spreadsheet_id(input_str: str) -> str:
@@ -36,126 +125,127 @@ def extract_spreadsheet_id(input_str: str) -> str:
 
 
 def init_db():
+    """Idempotently initialize all database tables and perform safe schema migrations."""
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    id_type = "SERIAL PRIMARY KEY" if conn.is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
+
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS spreadsheet_sources (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_id TEXT UNIQUE NOT NULL,
-            name TEXT NOT NULL,
+            id {id_type},
+            source_id VARCHAR(100) UNIQUE NOT NULL,
+            name VARCHAR(255) NOT NULL,
             spreadsheet_id TEXT NOT NULL,
             description TEXT DEFAULT '',
-            period TEXT DEFAULT '',
-            status TEXT DEFAULT 'active', -- 'active', 'archived', 'disabled'
-            is_active INTEGER DEFAULT 0,  -- 1 for currently active live spreadsheet
-            poll_interval_seconds INTEGER DEFAULT 30,
-            last_sync_at TEXT,
-            last_sync_status TEXT DEFAULT 'pending', -- 'success', 'warning', 'error', 'pending'
+            period VARCHAR(50) DEFAULT '',
+            status VARCHAR(50) DEFAULT 'active', -- 'active', 'archived', 'disabled'
+            is_active INTEGER DEFAULT 0,          -- 1 for currently active live spreadsheet
+            poll_interval_seconds INTEGER DEFAULT 15,
+            last_sync_at VARCHAR(100),
+            last_sync_status VARCHAR(50) DEFAULT 'pending', -- 'success', 'warning', 'error', 'pending'
             last_sync_error TEXT,
-            fingerprint TEXT DEFAULT '',
-            source_type TEXT DEFAULT 'google_sheets', -- 'google_sheets', 'excel_upload'
+            fingerprint VARCHAR(255) DEFAULT '',
+            source_type VARCHAR(50) DEFAULT 'google_sheets', -- 'google_sheets', 'excel_upload'
             total_worksheets INTEGER DEFAULT 0,
             total_records INTEGER DEFAULT 0,
-            last_analyzed_at TEXT,
-            analysis_status TEXT DEFAULT 'idle', -- 'idle', 'analyzing', 'completed', 'failed'
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            last_analyzed_at VARCHAR(100),
+            analysis_status VARCHAR(50) DEFAULT 'idle',
+            created_at VARCHAR(100) NOT NULL,
+            updated_at VARCHAR(100) NOT NULL
         )
     """)
 
-    # Safe migration for existing installations missing new source fields
-    cursor.execute("PRAGMA table_info(spreadsheet_sources)")
-    source_cols = [c[1] for c in cursor.fetchall()]
-    if 'source_type' not in source_cols:
-        cursor.execute("ALTER TABLE spreadsheet_sources ADD COLUMN source_type TEXT DEFAULT 'google_sheets'")
-    if 'total_worksheets' not in source_cols:
-        cursor.execute("ALTER TABLE spreadsheet_sources ADD COLUMN total_worksheets INTEGER DEFAULT 0")
-    if 'total_records' not in source_cols:
-        cursor.execute("ALTER TABLE spreadsheet_sources ADD COLUMN total_records INTEGER DEFAULT 0")
-    if 'last_analyzed_at' not in source_cols:
-        cursor.execute("ALTER TABLE spreadsheet_sources ADD COLUMN last_analyzed_at TEXT")
-    if 'analysis_status' not in source_cols:
-        cursor.execute("ALTER TABLE spreadsheet_sources ADD COLUMN analysis_status TEXT DEFAULT 'idle'")
+    # Safe column migrations for spreadsheet_sources
+    if not conn.is_postgres:
+        cursor.execute("PRAGMA table_info(spreadsheet_sources)")
+        source_cols = [c[1] for c in cursor.fetchall()]
+        if 'source_type' not in source_cols:
+            cursor.execute("ALTER TABLE spreadsheet_sources ADD COLUMN source_type TEXT DEFAULT 'google_sheets'")
+        if 'total_worksheets' not in source_cols:
+            cursor.execute("ALTER TABLE spreadsheet_sources ADD COLUMN total_worksheets INTEGER DEFAULT 0")
+        if 'total_records' not in source_cols:
+            cursor.execute("ALTER TABLE spreadsheet_sources ADD COLUMN total_records INTEGER DEFAULT 0")
+        if 'last_analyzed_at' not in source_cols:
+            cursor.execute("ALTER TABLE spreadsheet_sources ADD COLUMN last_analyzed_at TEXT")
+        if 'analysis_status' not in source_cols:
+            cursor.execute("ALTER TABLE spreadsheet_sources ADD COLUMN analysis_status TEXT DEFAULT 'idle'")
 
-    # New Intelligence Table: Worksheet Metadata
-    cursor.execute("""
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS worksheet_metadata (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_id TEXT NOT NULL,
-            sheet_name TEXT NOT NULL,
+            id {id_type},
+            source_id VARCHAR(100) NOT NULL,
+            sheet_name VARCHAR(255) NOT NULL,
             row_count INTEGER DEFAULT 0,
             col_count INTEGER DEFAULT 0,
             header_row INTEGER DEFAULT 1,
-            structure_type TEXT DEFAULT 'tabular',
-            classification TEXT DEFAULT 'unknown',
+            structure_type VARCHAR(100) DEFAULT 'tabular',
+            classification VARCHAR(100) DEFAULT 'unknown',
             quality_score REAL DEFAULT 100.0,
-            analysis_status TEXT DEFAULT 'completed',
-            summary_json TEXT DEFAULT '{}',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
+            analysis_status VARCHAR(50) DEFAULT 'completed',
+            summary_json TEXT DEFAULT '{{}}',
+            created_at VARCHAR(100) NOT NULL,
+            updated_at VARCHAR(100) NOT NULL,
             UNIQUE(source_id, sheet_name)
         )
     """)
 
-    # New Intelligence Table: Dynamic Column Metadata
-    cursor.execute("""
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS dynamic_column_metadata (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_id TEXT NOT NULL,
-            sheet_name TEXT NOT NULL,
+            id {id_type},
+            source_id VARCHAR(100) NOT NULL,
+            sheet_name VARCHAR(255) NOT NULL,
             column_index INTEGER NOT NULL,
             original_col TEXT NOT NULL,
             normalized_col TEXT NOT NULL,
-            inferred_role TEXT NOT NULL,
-            inferred_type TEXT DEFAULT 'text',
+            inferred_role VARCHAR(100) NOT NULL,
+            inferred_type VARCHAR(50) DEFAULT 'text',
             confidence REAL DEFAULT 0.5,
             sample_values_json TEXT DEFAULT '[]',
-            stats_json TEXT DEFAULT '{}',
-            mapping_status TEXT DEFAULT 'auto', -- 'auto', 'approved', 'rejected', 'custom'
+            stats_json TEXT DEFAULT '{{}}',
+            mapping_status VARCHAR(50) DEFAULT 'auto',
             requires_review INTEGER DEFAULT 0,
             reason TEXT DEFAULT '',
-            updated_at TEXT NOT NULL,
+            updated_at VARCHAR(100) NOT NULL,
             UNIQUE(source_id, sheet_name, column_index)
         )
     """)
 
-    # New Intelligence Table: Dynamic Records (preserves ALL columns and literal values)
-    cursor.execute("""
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS dynamic_records (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_id TEXT NOT NULL,
-            sheet_name TEXT NOT NULL,
+            id {id_type},
+            source_id VARCHAR(100) NOT NULL,
+            sheet_name VARCHAR(255) NOT NULL,
             row_index INTEGER NOT NULL,
             raw_data_json TEXT NOT NULL,
-            inferred_data_json TEXT DEFAULT '{}',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
+            inferred_data_json TEXT DEFAULT '{{}}',
+            created_at VARCHAR(100) NOT NULL,
+            updated_at VARCHAR(100) NOT NULL,
             UNIQUE(source_id, sheet_name, row_index)
         )
     """)
 
-    cursor.execute("""
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS spreadsheet_sheets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_id TEXT NOT NULL,
-            sheet_name TEXT NOT NULL,
+            id {id_type},
+            source_id VARCHAR(100) NOT NULL,
+            sheet_name VARCHAR(255) NOT NULL,
             sheet_index INTEGER DEFAULT 0,
             row_count INTEGER DEFAULT 0,
             col_count INTEGER DEFAULT 0,
             data_start_row INTEGER DEFAULT 3,
-            status TEXT DEFAULT 'success',
-            last_sync_at TEXT,
+            status VARCHAR(50) DEFAULT 'success',
+            last_sync_at VARCHAR(100),
             issues_json TEXT DEFAULT '[]',
             UNIQUE(source_id, sheet_name)
         )
     """)
 
-    cursor.execute("""
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS sheet_column_mappings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_id TEXT NOT NULL,
-            sheet_name TEXT NOT NULL,
+            id {id_type},
+            source_id VARCHAR(100) NOT NULL,
+            sheet_name VARCHAR(255) NOT NULL,
             part_no_col TEXT,
             desc_col TEXT,
             cat_col TEXT,
@@ -165,86 +255,86 @@ def init_db():
             closing_col TEXT,
             amount_cols_json TEXT DEFAULT '[]',
             date_columns_json TEXT DEFAULT '[]',
-            extra_mappings_json TEXT DEFAULT '{}',
-            updated_at TEXT NOT NULL,
+            extra_mappings_json TEXT DEFAULT '{{}}',
+            updated_at VARCHAR(100) NOT NULL,
             UNIQUE(source_id, sheet_name)
         )
     """)
 
-    cursor.execute("""
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS sync_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_id TEXT NOT NULL,
-            source_name TEXT,
-            timestamp TEXT NOT NULL,
-            status TEXT NOT NULL,
+            id {id_type},
+            source_id VARCHAR(100) NOT NULL,
+            source_name VARCHAR(255),
+            timestamp VARCHAR(100) NOT NULL,
+            status VARCHAR(50) NOT NULL,
             sheets_processed INTEGER DEFAULT 0,
             products_imported INTEGER DEFAULT 0,
             movements_imported INTEGER DEFAULT 0,
-            fingerprint TEXT DEFAULT '',
+            fingerprint VARCHAR(255) DEFAULT '',
             duration_ms INTEGER DEFAULT 0,
             error_message TEXT
         )
     """)
 
-    cursor.execute("""
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS sync_runs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT NOT NULL,
-            status TEXT NOT NULL,
+            id {id_type},
+            timestamp VARCHAR(100) NOT NULL,
+            status VARCHAR(50) NOT NULL,
             sheets_processed INTEGER DEFAULT 0,
             products_count INTEGER DEFAULT 0,
             movements_count INTEGER DEFAULT 0,
-            fingerprint TEXT,
+            fingerprint VARCHAR(255),
             error_message TEXT
         )
     """)
 
-    cursor.execute("""
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS inventory_records (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_id TEXT NOT NULL,
-            source_sheet TEXT NOT NULL,
+            id {id_type},
+            source_id VARCHAR(100) NOT NULL,
+            source_sheet VARCHAR(255) NOT NULL,
             source_row INTEGER NOT NULL,
-            product_id TEXT NOT NULL,
+            product_id VARCHAR(255) NOT NULL,
             part_no TEXT NOT NULL,
             description TEXT NOT NULL,
             category TEXT NOT NULL,
-            uom TEXT NOT NULL,
-            unit_price TEXT, -- Stored as string to strictly preserve 'NA' and '-'
+            uom VARCHAR(50) NOT NULL,
+            unit_price TEXT,
             opening_stock TEXT,
             current_stock TEXT,
-            latest_date TEXT,
+            latest_date VARCHAR(50),
             min_level REAL DEFAULT 10,
-            stock_status TEXT,
-            period TEXT,
-            extra_fields_json TEXT DEFAULT '{}',
+            stock_status VARCHAR(50),
+            period VARCHAR(50),
+            extra_fields_json TEXT DEFAULT '{{}}',
             validation_flags_json TEXT DEFAULT '[]',
-            updated_at TEXT NOT NULL,
+            updated_at VARCHAR(100) NOT NULL,
             UNIQUE(source_id, source_sheet, source_row)
         )
     """)
 
-    cursor.execute("""
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS stock_movements (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            movement_id TEXT NOT NULL,
-            source_id TEXT NOT NULL,
-            source_sheet TEXT NOT NULL,
+            id {id_type},
+            movement_id VARCHAR(255) NOT NULL,
+            source_id VARCHAR(100) NOT NULL,
+            source_sheet VARCHAR(255) NOT NULL,
             source_row INTEGER NOT NULL,
-            date TEXT NOT NULL,
-            product_id TEXT NOT NULL,
+            date VARCHAR(50) NOT NULL,
+            product_id VARCHAR(255) NOT NULL,
             part_no TEXT,
             description TEXT,
             category TEXT,
-            movement_type TEXT NOT NULL, -- 'IN', 'OUT', 'IN/OUT'
+            movement_type VARCHAR(50) NOT NULL,
             qty REAL NOT NULL,
-            uom TEXT NOT NULL,
+            uom VARCHAR(50) NOT NULL,
             opening_stock REAL,
             in_qty REAL DEFAULT 0,
             out_qty REAL DEFAULT 0,
             closing_stock REAL,
-            period TEXT,
+            period VARCHAR(50),
             reference_no TEXT,
             party_name TEXT,
             remarks TEXT,
@@ -253,18 +343,22 @@ def init_db():
         )
     """)
 
-    cursor.execute("""
+    cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS audit_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT NOT NULL,
-            event_type TEXT NOT NULL,
+            id {id_type},
+            timestamp VARCHAR(100) NOT NULL,
+            event_type VARCHAR(100) NOT NULL,
             description TEXT NOT NULL,
             details TEXT
         )
     """)
 
-    # Explicit registration only: do not auto-seed sources
-    pass
+    # Performance indexes
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_inv_source ON inventory_records(source_id, source_sheet)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_inv_product ON inventory_records(product_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mov_source ON stock_movements(source_id, source_sheet)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mov_date ON stock_movements(date)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mov_prod ON stock_movements(product_id)")
 
     conn.commit()
     conn.close()
@@ -307,6 +401,16 @@ def get_active_source() -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 
+def get_active_and_enabled_sources() -> List[Dict[str, Any]]:
+    """Return all explicitly registered spreadsheet sources that are active and not disabled."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM spreadsheet_sources WHERE status = 'active' ORDER BY is_active DESC, id ASC")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def create_source(
     name: str,
     spreadsheet_url_or_id: str,
@@ -314,7 +418,7 @@ def create_source(
     description: str = "",
     status: str = "active",
     is_active: bool = False,
-    poll_interval: int = 30
+    poll_interval: int = 15
 ) -> Dict[str, Any]:
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -347,7 +451,6 @@ def create_source(
         now_iso,
         now_iso
     ))
-
     conn.commit()
     conn.close()
     record_audit("SOURCE_CREATED", f"Created spreadsheet source '{name}'", {"source_id": source_id, "sheet_id": sheet_id})
@@ -561,11 +664,27 @@ def replace_source_snapshot(
 
         if inv_rows:
             cursor.executemany("""
-                INSERT OR REPLACE INTO inventory_records (
+                INSERT INTO inventory_records (
                     source_id, source_sheet, source_row, product_id, part_no, description, category,
                     uom, unit_price, opening_stock, current_stock, latest_date, min_level,
                     stock_status, period, extra_fields_json, validation_flags_json, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_id, source_sheet, source_row) DO UPDATE SET
+                    product_id = excluded.product_id,
+                    part_no = excluded.part_no,
+                    description = excluded.description,
+                    category = excluded.category,
+                    uom = excluded.uom,
+                    unit_price = excluded.unit_price,
+                    opening_stock = excluded.opening_stock,
+                    current_stock = excluded.current_stock,
+                    latest_date = excluded.latest_date,
+                    min_level = excluded.min_level,
+                    stock_status = excluded.stock_status,
+                    period = excluded.period,
+                    extra_fields_json = excluded.extra_fields_json,
+                    validation_flags_json = excluded.validation_flags_json,
+                    updated_at = excluded.updated_at
             """, inv_rows)
 
         mov_rows = []
@@ -596,11 +715,29 @@ def replace_source_snapshot(
 
         if mov_rows:
             cursor.executemany("""
-                INSERT OR REPLACE INTO stock_movements (
+                INSERT INTO stock_movements (
                     movement_id, source_id, source_sheet, source_row, date, product_id,
                     part_no, description, category, movement_type, qty, uom, opening_stock,
                     in_qty, out_qty, closing_stock, period, reference_no, party_name, remarks, validation_flags_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_id, movement_id) DO UPDATE SET
+                    date = excluded.date,
+                    product_id = excluded.product_id,
+                    part_no = excluded.part_no,
+                    description = excluded.description,
+                    category = excluded.category,
+                    movement_type = excluded.movement_type,
+                    qty = excluded.qty,
+                    uom = excluded.uom,
+                    opening_stock = excluded.opening_stock,
+                    in_qty = excluded.in_qty,
+                    out_qty = excluded.out_qty,
+                    closing_stock = excluded.closing_stock,
+                    period = excluded.period,
+                    reference_no = excluded.reference_no,
+                    party_name = excluded.party_name,
+                    remarks = excluded.remarks,
+                    validation_flags_json = excluded.validation_flags_json
             """, mov_rows)
 
         cursor.execute("""
@@ -619,7 +756,7 @@ def replace_source_snapshot(
     except Exception as e:
         conn.rollback()
         conn.close()
-        logger.error(f"Failed to replace snapshot for {source_id}: {e}")
+        logger.error(f"Failed to replace snapshot for {source_id}: {e}", exc_info=True)
         return False
 
 
@@ -821,6 +958,7 @@ def cleanup_deleted_worksheets(source_id: str, active_sheet_names: set):
         cursor.execute("DELETE FROM dynamic_column_metadata WHERE source_id = ? AND sheet_name = ?", (source_id, ds))
         cursor.execute("DELETE FROM dynamic_records WHERE source_id = ? AND sheet_name = ?", (source_id, ds))
         cursor.execute("DELETE FROM inventory_records WHERE source_id = ? AND source_sheet = ?", (source_id, ds))
+        cursor.execute("DELETE FROM stock_movements WHERE source_id = ? AND source_sheet = ?", (source_id, ds))
         cursor.execute("DELETE FROM spreadsheet_sheets WHERE source_id = ? AND sheet_name = ?", (source_id, ds))
     conn.commit()
     conn.close()
@@ -832,7 +970,6 @@ def save_dynamic_records(source_id: str, sheet_name: str, headers: List[str], da
     cursor = conn.cursor()
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    # Clear old dynamic records for this sheet to ensure idempotent snapshot
     cursor.execute("DELETE FROM dynamic_records WHERE source_id = ? AND sheet_name = ?", (source_id, sheet_name))
 
     batch = []
@@ -942,7 +1079,8 @@ def get_dynamic_records(
             SELECT count(*) FROM dynamic_records
             WHERE source_id = ? AND sheet_name = ? AND LOWER(raw_data_json) LIKE ?
         """, (source_id, sheet_name, search_wild))
-        total = cursor.fetchone()[0]
+        total_row = cursor.fetchone()
+        total = total_row[0] if isinstance(total_row, (list, tuple)) else list(total_row.values())[0]
 
         cursor.execute("""
             SELECT * FROM dynamic_records
@@ -955,7 +1093,8 @@ def get_dynamic_records(
             SELECT count(*) FROM dynamic_records
             WHERE source_id = ? AND sheet_name = ?
         """, (source_id, sheet_name))
-        total = cursor.fetchone()[0]
+        total_row = cursor.fetchone()
+        total = total_row[0] if isinstance(total_row, (list, tuple)) else list(total_row.values())[0]
 
         cursor.execute("""
             SELECT * FROM dynamic_records
@@ -992,21 +1131,20 @@ def get_data_quality_report(source_id: str) -> Dict[str, Any]:
     worksheets = get_worksheet_metadata(source_id)
     total_sheets = len(worksheets)
 
-    cursor.execute("""
-        SELECT count(*) FROM dynamic_records WHERE source_id = ?
-    """, (source_id,))
-    total_rows = cursor.fetchone()[0]
+    def _val(row):
+        return row[0] if isinstance(row, (list, tuple)) else list(row.values())[0]
 
-    cursor.execute("""
-        SELECT count(*) FROM dynamic_column_metadata WHERE source_id = ?
-    """, (source_id,))
-    total_cols = cursor.fetchone()[0]
+    cursor.execute("SELECT count(*) FROM dynamic_records WHERE source_id = ?", (source_id,))
+    total_rows = _val(cursor.fetchone())
+
+    cursor.execute("SELECT count(*) FROM dynamic_column_metadata WHERE source_id = ?", (source_id,))
+    total_cols = _val(cursor.fetchone())
 
     cursor.execute("""
         SELECT count(*) FROM dynamic_column_metadata
         WHERE source_id = ? AND inferred_role != 'unknown'
     """, (source_id,))
-    recognized_cols = cursor.fetchone()[0]
+    recognized_cols = _val(cursor.fetchone())
 
     unknown_cols = max(0, total_cols - recognized_cols)
 
@@ -1014,11 +1152,10 @@ def get_data_quality_report(source_id: str) -> Dict[str, Any]:
         SELECT count(*) FROM dynamic_column_metadata
         WHERE source_id = ? AND requires_review = 1
     """, (source_id,))
-    needs_review_cols = cursor.fetchone()[0]
+    needs_review_cols = _val(cursor.fetchone())
 
     conn.close()
 
-    # Aggregate duplicate candidates and issues
     all_duplicates = []
     all_issues = []
     scores = []
@@ -1044,4 +1181,3 @@ def get_data_quality_report(source_id: str) -> Dict[str, Any]:
         "duplicate_candidates": all_duplicates[:25],
         "quality_issues": all_issues
     }
-

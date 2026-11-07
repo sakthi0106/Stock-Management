@@ -1,14 +1,16 @@
+import os
 import hashlib
 import json
 import logging
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from config import Config
 from sheets_client import GoogleSheetsClient
-from sheet_analyzer import SheetAnalyzer
 from inventory_service import InventoryService
+from pipeline import UnifiedDataPipeline
+from spreadsheet_reader import UniversalSpreadsheetReader
 import database
 
 logger = logging.getLogger(__name__)
@@ -36,7 +38,6 @@ class SourceSyncState:
 
     def get_service(self) -> Optional[InventoryService]:
         if not self._service:
-            # Fallback to loading DB records for this source
             self._service = InventoryService(source_id=self.source_id, period=self.source.get('period', ''))
         return self._service
 
@@ -49,21 +50,18 @@ class SourceSyncState:
 
 
 class MultiSourceSyncService:
-    """Manages multi-source inventory polling, sync and unified queries."""
+    """Manages multi-source inventory polling, 15-second sync, and unified pipeline processing."""
     def __init__(self, default_client: Optional[GoogleSheetsClient] = None):
         self.default_client = default_client or GoogleSheetsClient()
         self._sources: Dict[str, SourceSyncState] = {}
         self._sources_lock = threading.RLock()
         self._poller_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
-        self._local_state: Optional[SourceSyncState] = None
+        self._is_paused = False
         self._instance_last_success: Optional[str] = None
+        self.pipeline = UnifiedDataPipeline()
 
         self._initialize_sources()
-        # Explicit registration only: do not automatically inject unprovided/demo snapshots
-
-    def _load_local_snapshot(self):
-        pass
 
     def _initialize_sources(self):
         with self._sources_lock:
@@ -74,26 +72,43 @@ class MultiSourceSyncService:
                 self._sources[sid] = SourceSyncState(s, client)
 
     def start_background_poller(self):
+        """Starts persistent background worker polling all active sources every 15 seconds."""
         if self._poller_thread and self._poller_thread.is_alive():
             return
         self._stop_event.clear()
         self._poller_thread = threading.Thread(target=self._poll_loop, daemon=True, name="SyncPollerThread")
         self._poller_thread.start()
-        logger.info("Started background inventory synchronization poller.")
+        logger.info(f"Started persistent background inventory poller ({Config.SYNC_INTERVAL_SECONDS}s interval).")
 
     def stop_background_poller(self):
         self._stop_event.set()
         if self._poller_thread:
             self._poller_thread.join(timeout=3.0)
 
+    def pause_sync(self):
+        self._is_paused = True
+        logger.info("Automatic 15-second synchronization paused by administrator.")
+
+    def resume_sync(self):
+        self._is_paused = False
+        logger.info("Automatic 15-second synchronization resumed by administrator.")
+
+    def is_paused(self) -> bool:
+        return self._is_paused
+
     def _poll_loop(self):
         while not self._stop_event.is_set():
-            try:
-                active_src = database.get_active_source()
-                if active_src:
-                    self.sync_source(active_src['source_id'], force=False)
-            except Exception as e:
-                logger.error(f"Error in background sync loop: {e}")
+            if not self._is_paused:
+                try:
+                    # Discover all active, explicitly registered sources
+                    active_sources = database.get_active_and_enabled_sources()
+                    for src in active_sources:
+                        sid = src.get('source_id')
+                        # Sync Google Sheets sources automatically every 15 seconds
+                        if src.get('source_type') != 'excel_upload':
+                            self.sync_source(sid, force=False)
+                except Exception as e:
+                    logger.error(f"Error in 15-second background sync loop: {e}", exc_info=True)
             time.sleep(Config.SYNC_INTERVAL_SECONDS)
 
     def register_source(self, source_dict: Dict[str, Any]):
@@ -109,6 +124,7 @@ class MultiSourceSyncService:
         self._initialize_sources()
 
     def sync_source(self, source_id: str, force: bool = False) -> Tuple[bool, Dict[str, Any]]:
+        """Synchronizes an active registered spreadsheet source using the UnifiedDataPipeline."""
         with self._sources_lock:
             state = self._sources.get(source_id)
             if not state:
@@ -123,18 +139,32 @@ class MultiSourceSyncService:
 
         state._is_syncing = True
         try:
-            client = state.build_client()
-            metadata = client.get_spreadsheet_metadata()
-            sheets_info = metadata.get('sheets', [])
-            sheet_names = [
-                s.get('properties', {}).get('title', '')
-                for s in sheets_info
-                if s.get('properties', {}).get('title')
-            ]
+            spreadsheet_ref = state.source.get('spreadsheet_id', '')
+            raw_data: Dict[str, List[List[Any]]] = {}
 
-            raw_data = client.get_batch_sheet_values(sheet_names)
+            if state.source.get('source_type') == 'excel_upload' or spreadsheet_ref.startswith('local_file:'):
+                file_path = spreadsheet_ref.replace('local_file:', '')
+                if not os.path.exists(file_path):
+                    uploads_dir = os.path.join(os.path.dirname(__file__), "uploads")
+                    possible = os.path.join(uploads_dir, os.path.basename(file_path))
+                    if os.path.exists(possible):
+                        file_path = possible
+                reader = UniversalSpreadsheetReader()
+                excel_extracted = reader.extract_from_excel(file_path)
+                for sname, sinfo in excel_extracted.get("sheets", {}).items():
+                    raw_data[sname] = sinfo.get("values", [])
+            else:
+                client = state.build_client()
+                metadata = client.get_spreadsheet_metadata()
+                sheets_info = metadata.get('sheets', [])
+                sheet_names = [
+                    s.get('properties', {}).get('title', '')
+                    for s in sheets_info
+                    if s.get('properties', {}).get('title')
+                ]
+                raw_data = client.get_batch_sheet_values(sheet_names)
 
-            # Compute fingerprint
+            # Compute content hash / fingerprint for change detection
             fp_hasher = hashlib.md5()
             for sname in sorted(raw_data.keys()):
                 fp_hasher.update(sname.encode('utf-8'))
@@ -142,72 +172,33 @@ class MultiSourceSyncService:
                     fp_hasher.update(str(r).encode('utf-8'))
             fingerprint = fp_hasher.hexdigest()
 
+            # Skip unchanged sheets unless forced
             if not force and fingerprint == state.fingerprint:
                 state._last_sync_time = datetime.now(timezone.utc).isoformat()
                 state._last_sync_status = "success"
                 return True, {"status": "unchanged", "fingerprint": fingerprint}
 
-            analyzer = SheetAnalyzer(client)
-            analysis = analyzer.analyze_all_sheets(metadata=metadata, raw_values=raw_data)
+            # Run Unified Data Pipeline
+            pipeline_res = self.pipeline.process_and_persist(
+                source_id=source_id,
+                raw_sheets_dict=raw_data,
+                fingerprint=fingerprint,
+                period=state.source.get('period', '')
+            )
 
-            database.save_sheets_and_mappings(source_id, list(analysis.get('sheets', {}).values()))
-
+            # Update in-memory InventoryService for live fast query responses
             srv = InventoryService(
-                analysis_report=analysis,
-                raw_sheets_data=raw_data,
                 source_id=source_id,
                 period=state.source.get('period', '')
             )
             state.set_service(srv)
 
-            # Persist to SQLite
-            database.replace_source_snapshot(
-                source_id=source_id,
-                period=state.source.get('period', ''),
-                products=srv.products,
-                movements=srv.movements,
-                fingerprint=fingerprint
-            )
-
-            # Automatically synchronize Dynamic Spreadsheet Intelligence (columns, rows, schemas)
-            try:
-                from spreadsheet_reader import UniversalSpreadsheetReader
-                from intelligence_engine import IntelligenceEngine
-                intel_engine = IntelligenceEngine()
-
-                database.cleanup_deleted_worksheets(source_id, set(raw_data.keys()))
-
-                total_intel_records = 0
-                for sname, s_values in raw_data.items():
-                    if not s_values:
-                        continue
-                    h_rows, headers, d_start = UniversalSpreadsheetReader.detect_header_rows(s_values)
-                    profile = intel_engine.profile_worksheet(
-                        sheet_name=sname,
-                        values=s_values,
-                        header_rows=h_rows,
-                        headers=headers,
-                        data_start_row=d_start
-                    )
-                    database.save_worksheet_analysis(source_id, profile)
-                    data_rows = s_values[d_start - 1:] if len(s_values) >= d_start else []
-                    database.save_dynamic_records(source_id, sname, headers, data_rows)
-                    total_intel_records += len(data_rows)
-
-                database.update_source_intelligence_status(
-                    source_id,
-                    status="completed",
-                    total_sheets=len(raw_data),
-                    total_records=total_intel_records
-                )
-            except Exception as e_intel:
-                logger.warning(f"Dynamic intelligence synchronization warning for '{source_id}': {e_intel}")
-
+            # Record sync run in audit and history
             database.record_sync_run(
                 status="success",
-                sheets_processed=len(analysis.get('sheets', {})),
-                products_count=len(srv.products),
-                movements_count=len(srv.movements),
+                sheets_processed=pipeline_res["total_sheets"],
+                products_count=pipeline_res["total_inventory_records"],
+                movements_count=pipeline_res["total_stock_movements"],
                 fingerprint=fingerprint,
                 source_id=source_id,
                 source_name=state.source.get('name')
@@ -221,12 +212,13 @@ class MultiSourceSyncService:
 
             return True, {
                 "status": "success",
-                "products_count": len(srv.products),
-                "movements_count": len(srv.movements),
+                "products_count": pipeline_res["total_inventory_records"],
+                "movements_count": pipeline_res["total_stock_movements"],
+                "total_sheets": pipeline_res["total_sheets"],
                 "fingerprint": fingerprint
             }
         except Exception as e:
-            logger.error(f"Sync failed for source '{source_id}': {e}")
+            logger.error(f"Sync failed for source '{source_id}': {e}", exc_info=True)
             state._last_sync_status = "error"
             state._last_sync_error = str(e)
             database.record_sync_run(
@@ -259,9 +251,7 @@ class MultiSourceSyncService:
                     state = self._sources.get(sid)
                     if state and state.get_service():
                         return state.get_service()
-                # Load from database for active source
                 return InventoryService(source_id=sid)
-            # If no active source is registered, return an empty inventory service
             return InventoryService(source_id="")
 
         if source_filter == "all":
@@ -291,18 +281,15 @@ class MultiSourceSyncService:
         sheets = []
         if active_src:
             sid = active_src['source_id']
-            sheets_data = database.get_sheets_for_source(sid)
+            sheets_data = database.get_worksheet_metadata(sid)
             for s in sheets_data:
-                issues = []
-                try:
-                    issues = json.loads(s.get("issues_json") or "[]")
-                except Exception:
-                    pass
+                summary = s.get("summary", {})
+                issues = summary.get("quality_issues", [])
                 sheets.append({
                     "name": s.get("sheet_name", ""),
-                    "status": s.get("status", "success"),
+                    "status": s.get("analysis_status", "success"),
                     "row_count": s.get("row_count", 0),
-                    "last_sync": s.get("last_sync_at"),
+                    "last_sync": s.get("updated_at"),
                     "issues": issues
                 })
             with self._sources_lock:
@@ -311,15 +298,17 @@ class MultiSourceSyncService:
                     is_live = True
 
         return {
-            "state": "connected" if is_live else "demo",
+            "state": "connected" if is_live else ("paused" if self._is_paused else "demo"),
             "is_live_google_sheet": is_live,
-            "lastSuccess": self._instance_last_success,
+            "is_paused": self._is_paused,
+            "poll_interval_seconds": Config.SYNC_INTERVAL_SECONDS,
+            "lastSuccess": self._instance_last_success or (active_src.get('last_sync_at') if active_src else None),
             "lastError": active_src.get('last_sync_error') if active_src else None,
             "source": active_src.get('name', 'Default Source') if active_src else "Primary Stock Sheet",
             "itemsSynced": len(srv.products) if srv else 0,
             "sheetsProcessed": len(sheets),
             "sheets": sheets,
-            "nextSync": None
+            "nextSync": f"Every {Config.SYNC_INTERVAL_SECONDS} seconds"
         }
 
     def get_source_status(self, source_id: str) -> Dict[str, Any]:

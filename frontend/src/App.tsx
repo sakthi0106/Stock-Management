@@ -34,6 +34,7 @@ export function App() {
 
   useEffect(() => {
     fetchSync();
+    // Mandatory 15-second polling interval for live updates from backend
     const interval = setInterval(fetchSync, 15000);
     return () => clearInterval(interval);
   }, []);
@@ -54,6 +55,10 @@ export function App() {
     setInventoryStatusFilter(statusFilter);
     setCurrentTab('inventory');
   };
+
+  const currentRefreshKey = syncStatus?.lastSuccess
+    ? `${syncStatus.lastSuccess}_${syncStatus.itemsSynced || 0}`
+    : null;
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 flex">
@@ -96,7 +101,7 @@ export function App() {
               <Dashboard
                 onNavigateToInventory={handleNavigateToInventory}
                 onNavigateToMovements={() => setCurrentTab('movements')}
-                refreshKey={syncStatus?.lastSuccess}
+                refreshKey={currentRefreshKey}
                 selectedSource={selectedSource}
                 onSourceChange={setSelectedSource}
               />
@@ -105,25 +110,25 @@ export function App() {
               <Inventory
                 initialStatusFilter={inventoryStatusFilter}
                 globalSearch={searchQuery}
-                refreshKey={syncStatus?.lastSuccess}
+                refreshKey={currentRefreshKey}
                 selectedSource={selectedSource}
                 onSourceChange={setSelectedSource}
               />
             )}
             {currentTab === 'movements' && (
               <Movements
-                refreshKey={syncStatus?.lastSuccess}
+                refreshKey={currentRefreshKey}
                 selectedSource={selectedSource}
                 onSourceChange={setSelectedSource}
               />
             )}
-            {currentTab === 'reports' && <Reports refreshKey={syncStatus?.lastSuccess} />}
-            {currentTab === 'quality' && <DataQuality refreshKey={syncStatus?.lastSuccess} />}
+            {currentTab === 'reports' && <Reports refreshKey={currentRefreshKey} />}
+            {currentTab === 'quality' && <DataQuality refreshKey={currentRefreshKey} />}
             {currentTab === 'sources' && (
-              <SpreadsheetSources refreshKey={syncStatus?.lastSuccess} />
+              <SpreadsheetSources refreshKey={currentRefreshKey} />
             )}
             {currentTab === 'intelligence' && (
-              <SpreadsheetIntelligence refreshKey={syncStatus?.lastSuccess} />
+              <SpreadsheetIntelligence refreshKey={currentRefreshKey} />
             )}
             {currentTab === 'sync' && (
               <SyncStatus

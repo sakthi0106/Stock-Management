@@ -99,21 +99,24 @@ export interface InventoryFilters {
 
 export interface SheetSyncStatus {
   name: string;
-  status: 'success' | 'warning' | 'error';
+  status: 'success' | 'warning' | 'error' | 'completed';
   row_count: number;
   last_sync: string | null;
   issues: string[];
 }
 
 export interface SyncStatus {
-  state: 'connected' | 'syncing' | 'error' | 'disconnected' | 'demo';
+  state: 'connected' | 'syncing' | 'error' | 'disconnected' | 'demo' | 'paused';
   is_live_google_sheet: boolean;
+  is_paused?: boolean;
+  poll_interval_seconds?: number;
   lastSuccess: string | null;
   lastError: string | null;
   source?: string;
   itemsSynced?: number;
   sheetsProcessed: number;
   sheets: SheetSyncStatus[];
+  nextSync?: string | null;
 }
 
 export interface DashboardKPI {

@@ -191,6 +191,14 @@ class ApiClient {
   //  Sync                                                                 //
   // ------------------------------------------------------------------ //
 
+  async pauseSync(): Promise<{ success: boolean; message: string; status: SyncStatus }> {
+    return this.request('/sync/pause', { method: 'POST' });
+  }
+
+  async resumeSync(): Promise<{ success: boolean; message: string; status: SyncStatus }> {
+    return this.request('/sync/resume', { method: 'POST' });
+  }
+
   async getSyncStatus(): Promise<SyncStatus> {
     return this.request<SyncStatus>('/sync/status');
   }
