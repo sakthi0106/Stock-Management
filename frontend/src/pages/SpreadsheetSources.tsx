@@ -481,7 +481,10 @@ const SourceCard: React.FC<SourceCardProps> = ({ source, onRefresh }) => {
 
   const isPermissionError = source.last_sync_error && (
     source.last_sync_error.includes('403') ||
-    source.last_sync_error.toLowerCase().includes('permission')
+    source.last_sync_error.includes('404') ||
+    source.last_sync_error.toLowerCase().includes('permission') ||
+    source.last_sync_error.toLowerCase().includes('cannot access') ||
+    source.last_sync_error.toLowerCase().includes('access required')
   );
 
   return (

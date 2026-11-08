@@ -247,18 +247,22 @@ class MultiSourceSyncService:
             }
         except Exception as e:
             logger.error(f"Sync failed for source '{source_id}': {e}", exc_info=True)
+            err_msg = str(e)
+            if any(w in err_msg.lower() for w in ["403", "404", "permission", "not found"]):
+                from sheets_client import SERVICE_ACCOUNT_EMAIL
+                err_msg = f"Cannot access Google Sheet (403/404). Please share your Google Sheet with Viewer access to: {SERVICE_ACCOUNT_EMAIL}"
             state._last_sync_status = "error"
-            state._last_sync_error = str(e)
+            state._last_sync_error = err_msg
             database.record_sync_run(
                 status="error",
                 sheets_processed=0,
                 products_count=0,
                 movements_count=0,
-                error_message=str(e),
+                error_message=err_msg,
                 source_id=source_id,
                 source_name=state.source.get('name')
             )
-            return False, {"status": "error", "error": str(e)}
+            return False, {"status": "error", "error": err_msg}
         finally:
             state._is_syncing = False
 
