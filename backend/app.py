@@ -62,8 +62,13 @@ def create_app():
         except Exception:
             pass
 
-    signal.signal(signal.SIGTERM, _graceful_shutdown)
-    signal.signal(signal.SIGINT, _graceful_shutdown)
+    import threading
+    if threading.current_thread() is threading.main_thread():
+        try:
+            signal.signal(signal.SIGTERM, _graceful_shutdown)
+            signal.signal(signal.SIGINT, _graceful_shutdown)
+        except (ValueError, AttributeError, RuntimeError):
+            pass
     atexit.register(_graceful_shutdown)
 
     return app
