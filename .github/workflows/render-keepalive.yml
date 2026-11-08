@@ -1,0 +1,26 @@
+name: Render Backend Keepalive
+
+on:
+  schedule:
+    # Triggers every 10 minutes to keep Render Free tier active (avoids 15-minute idle shutdown)
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    name: Send Ping to Render Backend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Health Endpoint
+        run: |
+          TARGET_URL="${{ secrets.RENDER_BACKEND_URL || secrets.RENDER_EXTERNAL_URL }}"
+          if [ -z "$TARGET_URL" ]; then
+            echo "RENDER_BACKEND_URL secret is not configured yet."
+            echo "To enable GitHub Actions external keepalive, add RENDER_BACKEND_URL (e.g. https://<app>.onrender.com) to Repo Settings -> Secrets and variables -> Actions."
+            exit 0
+          fi
+
+          CLEAN_URL="${TARGET_URL%/}"
+          echo "Sending keepalive ping to $CLEAN_URL/api/health..."
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 45 "$CLEAN_URL/api/health" || echo "000")
+          echo "Ping response status: $HTTP_STATUS"

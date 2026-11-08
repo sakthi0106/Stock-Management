@@ -1,4 +1,6 @@
 import os
+import atexit
+import signal
 import logging
 from flask import Flask, jsonify, send_from_directory
 from flask_cors import CORS
@@ -7,6 +9,7 @@ from database import init_db
 from sheets_client import GoogleSheetsClient
 from sync_service import SyncService
 from routes import api_bp, init_routes
+from keepalive import start_keepalive
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
 logger = logging.getLogger('app')
@@ -16,7 +19,8 @@ DIST_FOLDER = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'fro
 
 def create_app():
     app = Flask(__name__)
-    CORS(app, resources={r"/api/*": {"origins": "*"}})
+    # Enable CORS with 24-hour preflight cache to eliminate redundant OPTIONS roundtrips
+    CORS(app, resources={r"/api/*": {"origins": "*"}, r"/health": {"origins": "*"}}, max_age=86400)
 
     init_db()
 
@@ -24,8 +28,15 @@ def create_app():
     sync_service = SyncService(sheets_client)
     sync_service.start_background_poller()
 
+    # Launch Render free-tier keepalive ping worker (targets RENDER_EXTERNAL_URL every 10 mins)
+    start_keepalive(interval_seconds=600)
+
     init_routes(sync_service)
     app.register_blueprint(api_bp)
+
+    @app.route('/health', methods=['GET'])
+    def server_health():
+        return jsonify({"status": "ok", "service": "stock-management-backend"}), 200
 
     @app.route('/', defaults={'path': ''})
     @app.route('/<path:path>')
@@ -42,6 +53,18 @@ def create_app():
     def internal_error(e):
         logger.error(f"Internal server error: {e}")
         return jsonify({"error": "Internal server error"}), 500
+
+    # Graceful shutdown handler for Render SIGTERM
+    def _graceful_shutdown(*args):
+        logger.info("Graceful shutdown signal received. Stopping background poller...")
+        try:
+            sync_service.stop_background_poller()
+        except Exception:
+            pass
+
+    signal.signal(signal.SIGTERM, _graceful_shutdown)
+    signal.signal(signal.SIGINT, _graceful_shutdown)
+    atexit.register(_graceful_shutdown)
 
     return app
 

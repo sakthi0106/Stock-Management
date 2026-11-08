@@ -112,8 +112,22 @@ class MultiSourceSyncService:
         return self._is_paused
 
     def _poll_loop(self):
+        # Immediate initial sync run upon worker startup so data is ready right away
+        if not self._is_paused and not self._stop_event.is_set():
+            try:
+                active_sources = database.get_active_and_enabled_sources()
+                for src in active_sources:
+                    sid = src.get('source_id')
+                    if src.get('source_type') != 'excel_upload':
+                        self.sync_source(sid, force=False)
+            except Exception as e:
+                logger.error(f"Error in initial startup background sync: {e}", exc_info=True)
+
         while not self._stop_event.is_set():
-            if not self._is_paused:
+            # Wait for interval or immediate wake up on shutdown/stop_event
+            if self._stop_event.wait(timeout=Config.SYNC_INTERVAL_SECONDS):
+                break
+            if not self._is_paused and not self._stop_event.is_set():
                 try:
                     # Discover all active, explicitly registered sources
                     active_sources = database.get_active_and_enabled_sources()
@@ -124,7 +138,6 @@ class MultiSourceSyncService:
                             self.sync_source(sid, force=False)
                 except Exception as e:
                     logger.error(f"Error in 15-second background sync loop: {e}", exc_info=True)
-            time.sleep(Config.SYNC_INTERVAL_SECONDS)
 
     def register_source(self, source_dict: Dict[str, Any]):
         with self._sources_lock:
