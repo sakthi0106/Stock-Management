@@ -26,7 +26,8 @@ class ApiClient {
     }
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 25000);
+    // 75-second timeout to allow sufficient window for Render free-tier cold boot
+    const timeoutId = setTimeout(() => controller.abort(), 75000);
 
     try {
       const response = await fetch(url, {

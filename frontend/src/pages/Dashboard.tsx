@@ -24,10 +24,12 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [data, setData] = useState<DashboardKPI | null>(null);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  const [retryCountdown, setRetryCountdown] = useState<number | null>(null);
 
   const fetchDashboard = () => {
     setLoading(true);
     setFetchError(null);
+    setRetryCountdown(null);
     apiClient.getDashboard(selectedSource)
       .then((res) => {
         setData(res);
@@ -45,6 +47,25 @@ export const Dashboard: React.FC<DashboardProps> = ({
     fetchDashboard();
   }, [refreshKey, selectedSource]);
 
+  useEffect(() => {
+    if (fetchError && !data) {
+      setRetryCountdown(5);
+      const timer = setInterval(() => {
+        setRetryCountdown((prev) => {
+          if (prev === null || prev <= 1) {
+            clearInterval(timer);
+            fetchDashboard();
+            return null;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+      return () => clearInterval(timer);
+    } else {
+      setRetryCountdown(null);
+    }
+  }, [fetchError, data]);
+
   if (fetchError && !data) {
     return (
       <div className="p-8 bg-rose-50 border border-rose-200 rounded-2xl text-center space-y-4">
@@ -55,9 +76,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
         <p className="text-sm text-rose-600 max-w-md mx-auto">{fetchError}</p>
         <button
           onClick={fetchDashboard}
-          className="px-4 py-2 bg-rose-600 text-white rounded-xl text-sm font-semibold hover:bg-rose-700 shadow-sm transition"
+          className="px-5 py-2.5 bg-rose-600 text-white rounded-xl text-sm font-semibold hover:bg-rose-700 shadow-sm transition active:scale-95"
         >
-          Retry Loading
+          {retryCountdown !== null ? `Retrying in ${retryCountdown}s...` : 'Retry Loading'}
         </button>
       </div>
     );
