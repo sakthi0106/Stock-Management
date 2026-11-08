@@ -44,13 +44,29 @@ def _get_service_for_request(req):
 
 @api_bp.route('/health', methods=['GET'])
 def health():
-    status = sync_service.get_status()
+    active_src = database.get_active_source()
+    is_live = False
+    last_sync = None
+    state_str = "idle"
+    if active_src:
+        last_sync = active_src.get('last_sync_at')
+        last_status = active_src.get('last_sync_status')
+        if last_status == 'success':
+            is_live = True
+            state_str = "connected"
+        elif last_status == 'error':
+            state_str = "error"
+        elif last_status == 'pending':
+            state_str = "syncing"
+
     return jsonify({
         "status": "ok",
-        "sheets_connected": status.get("is_live_google_sheet", False),
-        "mode": "live" if status.get("is_live_google_sheet") else "demo",
-        "sync_state": status.get("state", "idle")
-    })
+        "service": "stock-management-backend",
+        "sheets_connected": is_live,
+        "mode": "live" if is_live else ("demo" if not active_src else "disconnected"),
+        "sync_state": state_str,
+        "last_sync_at": last_sync
+    }), 200
 
 
 @api_bp.route('/sheets', methods=['GET'])
@@ -373,7 +389,8 @@ def get_movements():
 def get_dashboard():
     srv, source = _get_service_for_request(request)
     if not srv:
-        return jsonify({"error": "No data available"}), 503
+        from inventory_service import InventoryService
+        srv = InventoryService(source_id=source or "")
 
     summary = srv.get_dashboard_summary()
     sync_status = sync_service.get_status()

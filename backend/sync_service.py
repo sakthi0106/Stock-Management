@@ -28,6 +28,8 @@ class SourceSyncState:
         self._last_sync_status = source_dict.get('last_sync_status', 'pending')
         self._last_sync_error = source_dict.get('last_sync_error')
         self._is_syncing = False
+        self._sync_lock = threading.Lock()
+        self._last_sync_timestamp: float = 0.0
 
     def build_client(self) -> GoogleSheetsClient:
         if self.client:
@@ -112,32 +114,29 @@ class MultiSourceSyncService:
         return self._is_paused
 
     def _poll_loop(self):
-        # Immediate initial sync run upon worker startup so data is ready right away
-        if not self._is_paused and not self._stop_event.is_set():
-            try:
-                active_sources = database.get_active_and_enabled_sources()
-                for src in active_sources:
-                    sid = src.get('source_id')
-                    if src.get('source_type') != 'excel_upload':
-                        self.sync_source(sid, force=False)
-            except Exception as e:
-                logger.error(f"Error in initial startup background sync: {e}", exc_info=True)
+        # 5-second initial startup grace period so web server handles incoming HTTP requests first
+        if self._stop_event.wait(timeout=5.0):
+            return
 
         while not self._stop_event.is_set():
-            # Wait for interval or immediate wake up on shutdown/stop_event
-            if self._stop_event.wait(timeout=Config.SYNC_INTERVAL_SECONDS):
-                break
-            if not self._is_paused and not self._stop_event.is_set():
+            if not self._is_paused:
                 try:
-                    # Discover all active, explicitly registered sources
                     active_sources = database.get_active_and_enabled_sources()
+                    now_ts = time.time()
                     for src in active_sources:
                         sid = src.get('source_id')
-                        # Sync Google Sheets sources automatically every 15 seconds
                         if src.get('source_type') != 'excel_upload':
-                            self.sync_source(sid, force=False)
+                            interval = max(45, int(src.get('poll_interval_seconds') or Config.SYNC_INTERVAL_SECONDS))
+                            with self._sources_lock:
+                                st = self._sources.get(sid)
+                                last_ts = getattr(st, '_last_sync_timestamp', 0.0) if st else 0.0
+                            if (now_ts - last_ts) >= interval:
+                                self.sync_source(sid, force=False)
                 except Exception as e:
-                    logger.error(f"Error in 15-second background sync loop: {e}", exc_info=True)
+                    logger.error(f"Error in background sync loop: {e}", exc_info=True)
+
+            if self._stop_event.wait(timeout=10.0):
+                break
 
     def register_source(self, source_dict: Dict[str, Any]):
         with self._sources_lock:
@@ -162,10 +161,11 @@ class MultiSourceSyncService:
                 state = SourceSyncState(src_dict)
                 self._sources[source_id] = state
 
-        if state._is_syncing and not force:
-            return False, {"status": "already_syncing"}
+        with state._sync_lock:
+            if state._is_syncing:
+                return False, {"status": "already_syncing", "message": "Synchronization is already in progress"}
+            state._is_syncing = True
 
-        state._is_syncing = True
         try:
             spreadsheet_ref = state.source.get('spreadsheet_id', '')
             raw_data: Dict[str, List[List[Any]]] = {}
@@ -191,6 +191,15 @@ class MultiSourceSyncService:
                     if s.get('properties', {}).get('title')
                 ]
                 raw_data = client.get_batch_sheet_values(sheet_names)
+
+            # Safety guarantee: Never overwrite existing valid data with an empty response
+            if not raw_data or all(len(v) == 0 for v in raw_data.values()):
+                existing_items = database.get_inventory_records(source_id=source_id)
+                if existing_items:
+                    logger.warning(f"Preserving cached data for '{source_id}': Google Sheets returned 0 records but {len(existing_items)} valid records exist in cache.")
+                    state._last_sync_status = "warning"
+                    state._last_sync_error = "Google Sheets returned empty data; preserving previously cached valid stock records."
+                    return False, {"status": "warning", "error": state._last_sync_error}
 
             # Compute content hash / fingerprint for change detection
             fp_hasher = hashlib.md5()
@@ -236,6 +245,7 @@ class MultiSourceSyncService:
             state._last_sync_time = datetime.now(timezone.utc).isoformat()
             state._last_sync_status = "success"
             state._last_sync_error = None
+            state._last_sync_timestamp = time.time()
             self._instance_last_success = state._last_sync_time
 
             return True, {

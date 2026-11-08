@@ -19,8 +19,8 @@ DIST_FOLDER = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'fro
 
 def create_app():
     app = Flask(__name__)
-    # Enable CORS with 24-hour preflight cache to eliminate redundant OPTIONS roundtrips
-    CORS(app, resources={r"/api/*": {"origins": "*"}, r"/health": {"origins": "*"}}, max_age=86400)
+    # Enable CORS with 24-hour preflight cache across all endpoints
+    CORS(app, resources={r"/*": {"origins": "*"}}, max_age=86400)
 
     init_db()
 

@@ -367,13 +367,20 @@ def init_db():
     conn.close()
 
 
+SOURCE_SELECT_FIELDS = """
+    s.*,
+    COALESCE(NULLIF((SELECT COUNT(*) FROM inventory_records ir WHERE ir.source_id = s.source_id), 0), s.total_records, 0) AS products_count,
+    COALESCE((SELECT COUNT(*) FROM stock_movements sm WHERE sm.source_id = s.source_id), 0) AS movements_count,
+    COALESCE(NULLIF((SELECT COUNT(*) FROM worksheet_metadata wm WHERE wm.source_id = s.source_id), 0), s.total_worksheets, 0) AS sheets_count
+"""
+
 def list_sources(include_disabled: bool = False) -> List[Dict[str, Any]]:
     conn = get_db_connection()
     cursor = conn.cursor()
     if include_disabled:
-        cursor.execute("SELECT * FROM spreadsheet_sources ORDER BY is_active DESC, updated_at DESC")
+        cursor.execute(f"SELECT {SOURCE_SELECT_FIELDS} FROM spreadsheet_sources s ORDER BY s.is_active DESC, s.updated_at DESC")
     else:
-        cursor.execute("SELECT * FROM spreadsheet_sources WHERE status != 'disabled' ORDER BY is_active DESC, updated_at DESC")
+        cursor.execute(f"SELECT {SOURCE_SELECT_FIELDS} FROM spreadsheet_sources s WHERE s.status != 'disabled' ORDER BY s.is_active DESC, s.updated_at DESC")
     rows = cursor.fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -386,10 +393,10 @@ def get_source(source_id: str) -> Optional[Dict[str, Any]]:
         return get_active_source()
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM spreadsheet_sources WHERE source_id = ?", (source_id,))
+    cursor.execute(f"SELECT {SOURCE_SELECT_FIELDS} FROM spreadsheet_sources s WHERE s.source_id = ?", (source_id,))
     row = cursor.fetchone()
     if not row and str(source_id).isdigit():
-        cursor.execute("SELECT * FROM spreadsheet_sources WHERE id = ?", (int(source_id),))
+        cursor.execute(f"SELECT {SOURCE_SELECT_FIELDS} FROM spreadsheet_sources s WHERE s.id = ?", (int(source_id),))
         row = cursor.fetchone()
     conn.close()
     return dict(row) if row else None
@@ -398,15 +405,15 @@ def get_source(source_id: str) -> Optional[Dict[str, Any]]:
 def get_active_source() -> Optional[Dict[str, Any]]:
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM spreadsheet_sources WHERE is_active = 1 LIMIT 1")
+    cursor.execute(f"SELECT {SOURCE_SELECT_FIELDS} FROM spreadsheet_sources s WHERE s.is_active = 1 LIMIT 1")
     row = cursor.fetchone()
     if not row:
         # Fallback to the most recently updated active source
-        cursor.execute("SELECT * FROM spreadsheet_sources WHERE status = 'active' ORDER BY updated_at DESC, id DESC LIMIT 1")
+        cursor.execute(f"SELECT {SOURCE_SELECT_FIELDS} FROM spreadsheet_sources s WHERE s.status = 'active' ORDER BY s.updated_at DESC, s.id DESC LIMIT 1")
         row = cursor.fetchone()
     if not row:
         # Fallback to any registered spreadsheet source
-        cursor.execute("SELECT * FROM spreadsheet_sources ORDER BY updated_at DESC, id DESC LIMIT 1")
+        cursor.execute(f"SELECT {SOURCE_SELECT_FIELDS} FROM spreadsheet_sources s ORDER BY s.updated_at DESC, s.id DESC LIMIT 1")
         row = cursor.fetchone()
     conn.close()
     return dict(row) if row else None
@@ -652,6 +659,16 @@ def replace_source_snapshot(
     now_iso = datetime.now(timezone.utc).isoformat()
 
     try:
+        # Safety guarantee: Never wipe valid cached records if incoming products list is empty
+        if not products:
+            cursor.execute("SELECT COUNT(*) FROM inventory_records WHERE source_id = ?", (source_id,))
+            cnt_row = cursor.fetchone()
+            existing_count = cnt_row[0] if cnt_row else 0
+            if existing_count > 0:
+                logger.warning(f"Preserving cached data for '{source_id}': incoming products list is empty but {existing_count} valid records exist.")
+                conn.close()
+                return False
+
         cursor.execute("DELETE FROM inventory_records WHERE source_id = ?", (source_id,))
         cursor.execute("DELETE FROM stock_movements WHERE source_id = ?", (source_id,))
 
@@ -764,9 +781,10 @@ def replace_source_snapshot(
                 last_sync_status = 'success',
                 last_sync_error = NULL,
                 fingerprint = ?,
+                total_records = ?,
                 updated_at = ?
             WHERE source_id = ?
-        """, (now_iso, fingerprint, now_iso, source_id))
+        """, (now_iso, fingerprint, len(inv_rows), now_iso, source_id))
 
         conn.commit()
         conn.close()

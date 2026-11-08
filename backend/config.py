@@ -28,7 +28,8 @@ def _clean_path(val: str) -> str:
 class Config:
     GOOGLE_SHEETS_SPREADSHEET_ID = os.getenv('GOOGLE_SHEETS_SPREADSHEET_ID', '').strip().strip('"').strip("'")
     GOOGLE_SERVICE_ACCOUNT_JSON = _clean_path(os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON', ''))
-    SYNC_INTERVAL_SECONDS = int(os.getenv('SYNC_INTERVAL_SECONDS', '15'))
+    SYNC_INTERVAL_SECONDS = int(os.getenv('SYNC_INTERVAL_SECONDS', '60'))
+    CACHE_TTL_SECONDS = int(os.getenv('CACHE_TTL_SECONDS', '60'))
     FLASK_HOST = os.getenv('FLASK_HOST', '127.0.0.1')
     FLASK_PORT = int(os.getenv('FLASK_PORT', '5050'))
     DATABASE_URL = os.getenv('DATABASE_URL', '').strip().strip('"').strip("'")

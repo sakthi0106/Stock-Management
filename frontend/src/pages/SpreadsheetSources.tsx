@@ -514,9 +514,9 @@ const SourceCard: React.FC<SourceCardProps> = ({ source, onRefresh }) => {
             )}
             <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
               {source.period && <span>📅 {source.period}</span>}
-              <span>🗂 {source.sheets_count} sheet{source.sheets_count !== 1 ? 's' : ''}</span>
-              <span>📦 {source.products_count} products</span>
-              <span>↕ {source.movements_count} movements</span>
+              <span>🗂 {Number(source.sheets_count) || 0} sheet{(Number(source.sheets_count) || 0) !== 1 ? 's' : ''}</span>
+              <span>📦 {Number(source.products_count) || 0} products</span>
+              <span>↕ {Number(source.movements_count) || 0} movements</span>
               <span className={`flex items-center gap-1 ${syncBadge(source.last_sync_status)}`}>
                 <Clock size={11} /> {syncTime}
               </span>
@@ -772,14 +772,14 @@ export function SpreadsheetSources({ refreshKey }: Props) {
           { label: 'Total Sources', value: sources.length, icon: Database, color: 'text-cyan-600' },
           { label: 'Active Sources', value: activeSources.length, icon: CheckCircle2, color: 'text-emerald-600' },
           { label: 'Archived Sources', value: archivedSources.length, icon: Archive, color: 'text-amber-600' },
-          { label: 'Total Products', value: sources.reduce((s, src) => s + src.products_count, 0), icon: TrendingUp, color: 'text-violet-600' },
+          { label: 'Total Products', value: sources.reduce((s, src) => s + (Number(src.products_count) || 0), 0), icon: TrendingUp, color: 'text-violet-600' },
         ].map(({ label, value, icon: Icon, color }) => (
           <div key={label} className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm">
             <div className="flex items-center gap-2 mb-1">
               <Icon size={16} className={color} />
               <span className="text-xs text-slate-500 font-medium">{label}</span>
             </div>
-            <p className="text-2xl font-bold text-slate-800">{value.toLocaleString()}</p>
+            <p className="text-2xl font-bold text-slate-800">{(Number(value) || 0).toLocaleString()}</p>
           </div>
         ))}
       </div>
@@ -792,7 +792,7 @@ export function SpreadsheetSources({ refreshKey }: Props) {
             <div>
               <p className="text-sm font-bold text-cyan-900">Current Active Source: {active.name}</p>
               <p className="text-xs text-cyan-700">
-                {active.sheets_count} sheets · {active.products_count} catalog products · {active.movements_count} daily transactions
+                {Number(active.sheets_count) || 0} sheets · {Number(active.products_count) || 0} catalog products · {Number(active.movements_count) || 0} daily transactions
                 {active.period ? ` · Period: ${active.period}` : ''}
               </p>
             </div>

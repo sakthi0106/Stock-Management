@@ -34,8 +34,8 @@ export function App() {
 
   useEffect(() => {
     fetchSync();
-    // Mandatory 15-second polling interval for live updates from backend
-    const interval = setInterval(fetchSync, 15000);
+    // Conservative 30-second polling interval for live sync status updates without freezing the UI
+    const interval = setInterval(fetchSync, 30000);
     return () => clearInterval(interval);
   }, []);
 

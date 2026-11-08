@@ -1,9 +1,11 @@
 import re
+import time
 import logging
 import json
 from datetime import datetime, date, timezone
 from typing import Dict, List, Any, Optional, Tuple, Union
 from collections import defaultdict
+from config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +85,7 @@ class InventoryService:
         self.movements: List[Dict[str, Any]] = []
         self.data_quality_issues: List[Dict[str, Any]] = []
         self._dashboard_summary_cache: Optional[Dict[str, Any]] = None
+        self._dashboard_summary_cache_time: float = 0.0
 
         self._build_models()
 
@@ -91,6 +94,7 @@ class InventoryService:
         self.movements.clear()
         self.data_quality_issues.clear()
         self._dashboard_summary_cache = None
+        self._dashboard_summary_cache_time = 0.0
 
         sheets_meta = self.analysis.get('sheets', {})
 
@@ -355,7 +359,9 @@ class InventoryService:
 
     def get_dashboard_summary(self) -> Dict[str, Any]:
         """Aggregate high performance analytics respecting strict UOM boundaries and zero amount exposure."""
-        if self._dashboard_summary_cache is not None:
+        now = time.time()
+        ttl = getattr(Config, 'CACHE_TTL_SECONDS', 60)
+        if self._dashboard_summary_cache is not None and (now - self._dashboard_summary_cache_time) < ttl:
             return dict(self._dashboard_summary_cache)
 
         total_prods = len(self.products)
@@ -439,6 +445,7 @@ class InventoryService:
             "last_updated": datetime.now(timezone.utc).isoformat()
         }
         self._dashboard_summary_cache = summary
+        self._dashboard_summary_cache_time = time.time()
         return dict(summary)
 
     def get_data_quality_report(self) -> Dict[str, Any]:

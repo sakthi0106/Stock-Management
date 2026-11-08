@@ -14,11 +14,13 @@ import {
   AnalysisTaskStatus,
 } from '../types';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
+const RAW_API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
+const API_BASE_URL = RAW_API_BASE_URL.replace(/\/+$/, '');
 
 class ApiClient {
   private async request<T>(endpoint: string, options?: RequestInit): Promise<T> {
-    const url = `${API_BASE_URL}${endpoint}`;
+    const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+    const url = `${API_BASE_URL}${cleanEndpoint}`;
     const method = (options?.method || 'GET').toUpperCase();
     const headers: Record<string, string> = {};
     if (method !== 'GET' && method !== 'HEAD') {

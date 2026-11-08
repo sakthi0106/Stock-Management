@@ -134,6 +134,17 @@ class UnifiedDataPipeline:
         """Atomically processes spreadsheet data, runs dynamic schema detection,
         and synchronizes dynamic_records, inventory_records, and stock_movements.
         """
+        if not raw_sheets_dict or len(raw_sheets_dict) == 0:
+            logger.warning(f"Preserving cached data: raw_sheets_dict is empty for source '{source_id}'. Aborting pipeline to prevent data wipe.")
+            return {
+                "source_id": source_id,
+                "total_sheets": 0,
+                "total_dynamic_records": 0,
+                "total_inventory_records": 0,
+                "total_stock_movements": 0,
+                "skipped_empty": True
+            }
+
         now_iso = datetime.now(timezone.utc).isoformat()
         database.cleanup_deleted_worksheets(source_id, set(raw_sheets_dict.keys()))
 
