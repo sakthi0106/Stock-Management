@@ -25,14 +25,19 @@ class ApiClient {
       headers['Content-Type'] = 'application/json';
     }
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 25000);
+
     try {
       const response = await fetch(url, {
         ...options,
+        signal: options?.signal || controller.signal,
         headers: {
           ...headers,
           ...options?.headers,
         },
       });
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
@@ -41,6 +46,12 @@ class ApiClient {
 
       return await response.json();
     } catch (error: any) {
+      clearTimeout(timeoutId);
+      if (error?.name === 'AbortError') {
+        const timeoutErr = new Error('Server took too long to respond. The cloud service may be cold-booting, please retry in a few moments.');
+        console.error(`API request timeout [${endpoint}]`);
+        throw timeoutErr;
+      }
       console.error(`API request failed [${endpoint}]:`, error);
       throw error;
     }

@@ -85,6 +85,21 @@ def create_source():
     is_active = bool(data.get('is_active', False))
     poll_interval = int(data.get('poll_interval_seconds', 30))
 
+    clean_id = database.extract_spreadsheet_id(url_or_id)
+    # Quick accessibility check for Google Sheets
+    if not clean_id.startswith("local_file:") and not os.path.exists(clean_id):
+        from sheets_client import GoogleSheetsClient, SERVICE_ACCOUNT_EMAIL
+        try:
+            probe = GoogleSheetsClient(spreadsheet_id=clean_id)
+            probe.get_spreadsheet_metadata(max_retries=1)
+        except Exception as e:
+            err_str = str(e)
+            if any(w in err_str.lower() for w in ["403", "404", "permission", "not found"]):
+                logger.warning(f"Google Sheet access check failed for {clean_id}: {e}")
+                return jsonify({
+                    "error": f"Cannot access Google Sheet. Please share your Google Sheet with Viewer access to: {SERVICE_ACCOUNT_EMAIL}"
+                }), 400
+
     new_src = database.create_source(
         name=name,
         spreadsheet_url_or_id=url_or_id,
@@ -96,10 +111,18 @@ def create_source():
     )
     sync_service.register_source(new_src)
 
-    # Perform initial sync
-    sync_service.sync_source(new_src['source_id'], force=True)
+    # Perform initial sync asynchronously in background so HTTP response returns instantly
+    source_id = new_src['source_id']
+    threading.Thread(
+        target=sync_service.sync_source,
+        args=(source_id,),
+        kwargs={'force': True},
+        daemon=True,
+        name=f"InitialSync-{source_id}"
+    ).start()
 
-    return jsonify({"source": new_src, "message": "Source created and initial sync triggered"}), 201
+    fresh_src = database.get_source(source_id) or new_src
+    return jsonify({"source": fresh_src, "message": "Source created and initial sync triggered"}), 201
 
 
 @api_bp.route('/sources/upload', methods=['POST'])

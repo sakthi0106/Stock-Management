@@ -106,8 +106,9 @@ class GoogleSheetsClient:
                 return sheet_metadata
             except Exception as e:
                 err_str = str(e)
-                if "403" in err_str or "PERMISSION_DENIED" in err_str:
-                    logger.error(f"Permission denied for sheet {self.spreadsheet_id}: {e}")
+                # Fail immediately on permission issues, not found, or private sheet errors without retrying
+                if any(w in err_str.lower() for w in ["403", "404", "permission", "not found"]):
+                    logger.error(f"Cannot access Google Sheet {self.spreadsheet_id}: {e}")
                     raise
                 if attempt == max_retries - 1:
                     raise

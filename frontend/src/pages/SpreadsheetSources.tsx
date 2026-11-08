@@ -31,7 +31,7 @@ const AddSourceModal: React.FC<AddModalProps> = ({ onClose, onAdded }) => {
     spreadsheet_url_or_id: '',
     period: '',
     description: '',
-    is_active: false,
+    is_active: true,
     poll_interval_seconds: 30,
   });
 
@@ -40,7 +40,7 @@ const AddSourceModal: React.FC<AddModalProps> = ({ onClose, onAdded }) => {
   const [uploadName, setUploadName] = useState('');
   const [uploadPeriod, setUploadPeriod] = useState('');
   const [uploadDescription, setUploadDescription] = useState('');
-  const [uploadIsActive, setUploadIsActive] = useState(false);
+  const [uploadIsActive, setUploadIsActive] = useState(true);
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -61,17 +61,10 @@ const AddSourceModal: React.FC<AddModalProps> = ({ onClose, onAdded }) => {
     setSaving(true);
     setError('');
     try {
-      const res = await apiClient.createSource({
+      await apiClient.createSource({
         ...googleForm,
         status: 'active',
       });
-      if (!res.source.last_sync_status || res.source.last_sync_status === 'error') {
-        if (res.source.last_sync_error) {
-          setError(res.source.last_sync_error);
-          onAdded();
-          return;
-        }
-      }
       onAdded();
       onClose();
     } catch (err: any) {

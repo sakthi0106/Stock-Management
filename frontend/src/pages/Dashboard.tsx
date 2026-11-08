@@ -66,6 +66,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
   if (loading && !data) {
     return (
       <div className="space-y-6">
+        <div className="bg-cyan-50/80 border border-cyan-200 p-4 rounded-2xl flex items-center gap-3 text-cyan-900 shadow-xs">
+          <div className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-cyan-600 border-t-transparent shrink-0" />
+          <div>
+            <p className="text-sm font-semibold">Connecting to Inventory Backend...</p>
+            <p className="text-xs text-cyan-700">Loading live spreadsheet inventory and warehouse metrics.</p>
+          </div>
+        </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           {[1, 2, 3, 4].map((i) => (
             <div key={i} className="h-28 rounded-2xl bg-white border border-slate-200 animate-pulse" />
