@@ -82,6 +82,7 @@ class InventoryService:
         self.products: List[Dict[str, Any]] = []
         self.movements: List[Dict[str, Any]] = []
         self.data_quality_issues: List[Dict[str, Any]] = []
+        self._dashboard_summary_cache: Optional[Dict[str, Any]] = None
 
         self._build_models()
 
@@ -89,6 +90,7 @@ class InventoryService:
         self.products.clear()
         self.movements.clear()
         self.data_quality_issues.clear()
+        self._dashboard_summary_cache = None
 
         sheets_meta = self.analysis.get('sheets', {})
 
@@ -353,6 +355,9 @@ class InventoryService:
 
     def get_dashboard_summary(self) -> Dict[str, Any]:
         """Aggregate high performance analytics respecting strict UOM boundaries and zero amount exposure."""
+        if self._dashboard_summary_cache is not None:
+            return dict(self._dashboard_summary_cache)
+
         total_prods = len(self.products)
         in_stock = sum(1 for p in self.products if p.get("stock_status") == "In Stock")
         low_stock = sum(1 for p in self.products if p.get("stock_status") == "Low Stock")
@@ -415,7 +420,7 @@ class InventoryService:
             {"status": "Unknown", "count": unknown_stock}
         ]
 
-        return {
+        summary = {
             "total_products": total_prods,
             "in_stock_count": in_stock,
             "low_stock_count": low_stock,
@@ -433,6 +438,8 @@ class InventoryService:
             "recent_movements": self.movements[:10],
             "last_updated": datetime.now(timezone.utc).isoformat()
         }
+        self._dashboard_summary_cache = summary
+        return dict(summary)
 
     def get_data_quality_report(self) -> Dict[str, Any]:
         """Compile comprehensive data quality issues across all sheets."""

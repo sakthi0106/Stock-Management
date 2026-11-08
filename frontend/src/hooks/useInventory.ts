@@ -49,8 +49,12 @@ export function useInventory(
     }
   }, [initialFilters?.status]);
 
-  const fetchInventory = useCallback(async () => {
-    setLoading(true);
+  const isFirstMount = useRef(true);
+
+  const fetchInventory = useCallback(async (isBackground = false) => {
+    if (!isBackground) {
+      setLoading(true);
+    }
     setError(null);
     try {
       const data = await apiClient.getInventory({ ...filters, source });
@@ -81,7 +85,7 @@ export function useInventory(
     try {
       const res = await apiClient.triggerSync(source);
       setSyncStatus(res.status);
-      await fetchInventory();
+      await fetchInventory(false);
     } catch (err: any) {
       setError(err.message || 'Sync failed');
     } finally {
@@ -91,9 +95,11 @@ export function useInventory(
 
   // Debounced fetch for instant responsiveness when typing search
   useEffect(() => {
+    const isBackground = !isFirstMount.current && products.length > 0;
+    isFirstMount.current = false;
     const handler = setTimeout(() => {
-      fetchInventory();
-    }, 200);
+      fetchInventory(isBackground);
+    }, 150);
     return () => clearTimeout(handler);
   }, [fetchInventory, refreshKey]);
 

@@ -279,6 +279,12 @@ class MultiSourceSyncService:
                     state = self._sources.get(sid)
                     if state and state.get_service():
                         return state.get_service()
+                    if not state:
+                        src_dict = database.get_source(sid)
+                        if src_dict:
+                            state = SourceSyncState(src_dict)
+                            self._sources[sid] = state
+                            return state.get_service()
                 return InventoryService(source_id=sid)
             return InventoryService(source_id="")
 
@@ -288,6 +294,11 @@ class MultiSourceSyncService:
         with self._sources_lock:
             state = self._sources.get(source_filter)
             if state and state.get_service():
+                return state.get_service()
+            src_dict = database.get_source(source_filter)
+            if src_dict:
+                state = SourceSyncState(src_dict)
+                self._sources[source_filter] = state
                 return state.get_service()
 
         return InventoryService(source_id=source_filter)

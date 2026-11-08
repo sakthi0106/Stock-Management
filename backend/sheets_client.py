@@ -124,7 +124,8 @@ class GoogleSheetsClient:
         if not self._is_configured or not self._service:
             raise ValueError(f"Google Sheets client is not configured: {self._last_error}")
 
-        ranges = [f"'{s}'!A1:ZZ" for s in sheet_names]
+        # Request exact used rectangular range per sheet rather than arbitrary ZZ bounds
+        ranges = [f"'{s}'" for s in sheet_names]
         try:
             result = self._service.spreadsheets().values().batchGet(
                 spreadsheetId=self.spreadsheet_id,
