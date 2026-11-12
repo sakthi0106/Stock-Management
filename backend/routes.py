@@ -67,12 +67,14 @@ def create_source():
         is_active=is_active
     )
 
-    # Trigger immediate background sync so UI responds fast without timeout
-    threading.Thread(target=_sync_manager.sync_source, args=(store.source_id, True), daemon=True).start()
+    # Synchronize immediately (with bounded 20s Google API timeout)
+    ok = _sync_manager.sync_source(store.source_id, force=True)
 
     return jsonify({
         "source": store.to_source_dict(),
-        "message": "Google Sheet registered and sync started"
+        "sync_success": ok,
+        "sync_error": store.last_sync_error,
+        "message": "Google Sheet registered and synced" if ok else f"Google Sheet registered (sync error: {store.last_sync_error})"
     }), 201
 
 

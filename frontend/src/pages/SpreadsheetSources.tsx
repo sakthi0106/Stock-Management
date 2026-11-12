@@ -550,7 +550,9 @@ const SourceCard: React.FC<SourceCardProps> = ({ source, onRefresh }) => {
             )}
 
             {source.last_sync_error && !isPermissionError && (
-              <p className="text-xs text-red-500 mt-2 truncate">⚠ {source.last_sync_error}</p>
+              <div className="mt-2 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 text-xs text-rose-700 break-words">
+                <span className="font-semibold">⚠ Sync Error:</span> {source.last_sync_error}
+              </div>
             )}
             {actionError && (
               <p className="text-xs text-red-500 mt-2">{actionError}</p>

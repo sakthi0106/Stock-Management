@@ -169,6 +169,13 @@ class SyncManager:
                 return False
 
             raw_dict = client.get_batch_sheet_values(sheet_names)
+            if not raw_dict and client.get_last_error():
+                err = client.get_last_error()
+                store.last_sync_status = "error"
+                store.last_sync_error = err
+                self._record_run(store, "error", err)
+                return False
+
             sheet_title = meta.get("properties", {}).get("title")
             if sheet_title and store.name in ("Primary Stock Sheet", "Google Sheet", ""):
                 store.name = sheet_title
