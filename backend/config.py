@@ -1,49 +1,25 @@
 import os
-import json
 from pathlib import Path
 from dotenv import load_dotenv
 
-BASE_DIR = Path(__file__).resolve().parent
-
-load_dotenv(BASE_DIR / '.env')
-load_dotenv(BASE_DIR.parent / '.env')
-
-
-def _clean_path(val: str) -> str:
-    if not val:
-        cred_default = BASE_DIR / 'credentials' / 'service_account.json'
-        if cred_default.exists():
-            return str(cred_default)
-        return ''
-    val = val.strip().strip('"').strip("'")
-    norm = os.path.normpath(val)
-    if os.path.exists(norm):
-        return norm
-    cred_fallback = BASE_DIR / 'credentials' / 'service_account.json'
-    if cred_fallback.exists():
-        return str(cred_fallback)
-    return norm
+# Load .env file from project root or backend dir
+backend_dir = Path(__file__).resolve().parent
+root_dir = backend_dir.parent
+load_dotenv(backend_dir / '.env')
+load_dotenv(root_dir / '.env')
 
 
 class Config:
-    GOOGLE_SHEETS_SPREADSHEET_ID = os.getenv('GOOGLE_SHEETS_SPREADSHEET_ID', '').strip().strip('"').strip("'")
-    GOOGLE_SERVICE_ACCOUNT_JSON = _clean_path(os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON', ''))
-    SYNC_INTERVAL_SECONDS = int(os.getenv('SYNC_INTERVAL_SECONDS', '60'))
-    CACHE_TTL_SECONDS = int(os.getenv('CACHE_TTL_SECONDS', '60'))
-    FLASK_HOST = os.getenv('FLASK_HOST', '127.0.0.1')
-    FLASK_PORT = int(os.getenv('FLASK_PORT', '5050'))
-    DATABASE_URL = os.getenv('DATABASE_URL', '').strip().strip('"').strip("'")
-    DATABASE_PATH = os.getenv('DATABASE_PATH', str(BASE_DIR / 'stock_metadata.db'))
-    CORS_ORIGINS = [
-        'http://localhost:5173',
-        'http://127.0.0.1:5173',
-        'http://localhost:5000',
-        'http://127.0.0.1:5000',
-        'http://localhost:3000',
-        'http://127.0.0.1:3000',
-    ]
-    DEFAULT_LOW_STOCK_THRESHOLD = 50
+    PORT = int(os.environ.get('PORT', 5000))
+    FLASK_ENV = os.environ.get('FLASK_ENV', 'production')
+    DEBUG = os.environ.get('DEBUG', 'False').lower() in ('true', '1')
 
-    @classmethod
-    def is_sheets_configured(cls) -> bool:
-        return bool(cls.GOOGLE_SHEETS_SPREADSHEET_ID and cls.GOOGLE_SERVICE_ACCOUNT_JSON and os.path.exists(cls.GOOGLE_SERVICE_ACCOUNT_JSON))
+    # Google Sheets credentials
+    GOOGLE_SHEETS_SPREADSHEET_ID = os.environ.get('GOOGLE_SHEETS_SPREADSHEET_ID', '').strip()
+    GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON', '').strip()
+
+    # Polling frequency (seconds)
+    SYNC_INTERVAL_SECONDS = int(os.environ.get('SYNC_INTERVAL_SECONDS', 15))
+
+    # Uploads folder
+    UPLOAD_FOLDER = backend_dir / 'uploads'
