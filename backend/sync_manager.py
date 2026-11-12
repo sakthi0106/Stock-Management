@@ -121,7 +121,8 @@ class SyncManager:
         self._is_paused = False
 
     def _poll_loop(self):
-        # Perform initial sync immediately if active source exists
+        # Allow web server port binding to complete before running initial background sync
+        time.sleep(2)
         if self.active_source_id:
             self.sync_source(self.active_source_id)
         while not self._stop_event.is_set():
@@ -139,7 +140,8 @@ class SyncManager:
         if store.source_type == "excel_upload":
             return True
 
-        if self._is_syncing and not force:
+        # Avoid concurrent Google API calls even if Sync Now is clicked repeatedly
+        if self._is_syncing:
             return False
 
         self._is_syncing = True

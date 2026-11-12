@@ -67,14 +67,13 @@ def create_source():
         is_active=is_active
     )
 
-    # Synchronize immediately (with bounded 20s Google API timeout)
-    ok = _sync_manager.sync_source(store.source_id, force=True)
+    # Trigger sync in background so Render cold-boot / large sheet fetch never triggers a 502/75s browser timeout;
+    # frontend polls /sources and /sync/status automatically.
+    threading.Thread(target=_sync_manager.sync_source, args=(store.source_id, True), daemon=True).start()
 
     return jsonify({
         "source": store.to_source_dict(),
-        "sync_success": ok,
-        "sync_error": store.last_sync_error,
-        "message": "Google Sheet registered and synced" if ok else f"Google Sheet registered (sync error: {store.last_sync_error})"
+        "message": "Google Sheet registered and sync started"
     }), 201
 
 
@@ -175,8 +174,8 @@ def archive_source(source_id: str):
 
 @api_bp.route('/sources/<source_id>/sync', methods=['POST'])
 def sync_single_source(source_id: str):
-    ok = _sync_manager.sync_source(source_id, force=True)
-    return jsonify({"success": ok, "status": _sync_manager.get_status()})
+    threading.Thread(target=_sync_manager.sync_source, args=(source_id, True), daemon=True).start()
+    return jsonify({"success": True, "status": _sync_manager.get_status(), "message": "Sync started"})
 
 
 @api_bp.route('/sources/<source_id>/sheets', methods=['GET'])
@@ -360,8 +359,8 @@ def sync_status():
 @api_bp.route('/sync/refresh', methods=['POST'])
 def sync_refresh():
     source = request.args.get('source', 'active').strip()
-    ok = _sync_manager.sync_source(source, force=True)
-    return jsonify({"success": ok, "status": _sync_manager.get_status()})
+    threading.Thread(target=_sync_manager.sync_source, args=(source, True), daemon=True).start()
+    return jsonify({"success": True, "status": _sync_manager.get_status(), "message": "Sync started"})
 
 
 @api_bp.route('/sync/pause', methods=['POST'])
