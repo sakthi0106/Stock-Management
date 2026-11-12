@@ -29,6 +29,14 @@ def create_app():
         response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
         return response
 
+    @app.errorhandler(Exception)
+    def handle_unexpected_error(err):
+        from werkzeug.exceptions import HTTPException
+        if isinstance(err, HTTPException):
+            return jsonify({"error": err.description}), err.code
+        logger.error(f"Unhandled server error: {err}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
     @app.route('/')
     def root():
         return jsonify({

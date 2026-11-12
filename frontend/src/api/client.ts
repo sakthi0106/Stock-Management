@@ -29,37 +29,68 @@ class ApiClient {
       headers['Content-Type'] = 'application/json';
     }
 
-    const controller = new AbortController();
-    // 75-second timeout to allow sufficient window for Render free-tier cold boot
-    const timeoutId = setTimeout(() => controller.abort(), 75000);
+    const isIdempotent = method === 'GET' || method === 'HEAD';
+    const maxAttempts = isIdempotent ? 3 : 1;
 
-    try {
-      const response = await fetch(url, {
-        ...options,
-        signal: options?.signal || controller.signal,
-        headers: {
-          ...headers,
-          ...options?.headers,
-        },
-      });
-      clearTimeout(timeoutId);
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const controller = new AbortController();
+      // 75-second timeout to allow sufficient window for Render free-tier cold boot
+      const timeoutId = setTimeout(() => controller.abort(), 75000);
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || `HTTP error ${response.status}`);
+      try {
+        const response = await fetch(url, {
+          ...options,
+          signal: options?.signal || controller.signal,
+          headers: {
+            ...headers,
+            ...options?.headers,
+          },
+        });
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+          // Retry transient Render proxy / gateway errors on idempotent GET/HEAD requests
+          if (isIdempotent && [502, 503, 504].includes(response.status) && attempt < maxAttempts && !options?.signal?.aborted) {
+            await new Promise((r) => setTimeout(r, attempt * 3000));
+            continue;
+          }
+          const errorData = await response.json().catch(() => ({}));
+          throw new Error(errorData.error || `HTTP error ${response.status}`);
+        }
+
+        return await response.json();
+      } catch (error: any) {
+        clearTimeout(timeoutId);
+        if (error?.name === 'AbortError') {
+          const timeoutErr = new Error('Server took too long to respond. The cloud service may be cold-booting, please retry in a few moments.');
+          console.error(`API request timeout [${endpoint}]`);
+          throw timeoutErr;
+        }
+
+        const msg = String(error?.message || '');
+        const isNetworkErr =
+          error instanceof TypeError ||
+          /failed to fetch|networkerror|load failed/i.test(msg);
+
+        if (isIdempotent && isNetworkErr && attempt < maxAttempts && !options?.signal?.aborted) {
+          await new Promise((r) => setTimeout(r, attempt * 3000));
+          continue;
+        }
+
+        if (isNetworkErr) {
+          const netErr = new Error(
+            `Cannot reach backend (${API_BASE_URL}). If hosted on Render free tier, it may still be waking up or redeploying (takes ~30-60s) — retrying automatically. If this persists, verify VITE_API_BASE_URL in Vercel.`
+          );
+          console.error(`API network failure [${endpoint}]:`, error);
+          throw netErr;
+        }
+
+        console.error(`API request failed [${endpoint}]:`, error);
+        throw error;
       }
-
-      return await response.json();
-    } catch (error: any) {
-      clearTimeout(timeoutId);
-      if (error?.name === 'AbortError') {
-        const timeoutErr = new Error('Server took too long to respond. The cloud service may be cold-booting, please retry in a few moments.');
-        console.error(`API request timeout [${endpoint}]`);
-        throw timeoutErr;
-      }
-      console.error(`API request failed [${endpoint}]:`, error);
-      throw error;
     }
+
+    throw new Error('Request failed after retries.');
   }
 
   async getHealth() {

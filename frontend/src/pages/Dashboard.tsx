@@ -91,7 +91,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
           <div className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-cyan-600 border-t-transparent shrink-0" />
           <div>
             <p className="text-sm font-semibold">Connecting to Inventory Backend...</p>
-            <p className="text-xs text-cyan-700">Loading live spreadsheet inventory and warehouse metrics.</p>
+            <p className="text-xs text-cyan-700">Loading live spreadsheet inventory (cloud backend may take 30–60s to wake if idle).</p>
           </div>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
