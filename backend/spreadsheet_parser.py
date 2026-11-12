@@ -169,12 +169,23 @@ class UniversalParser:
             'in_qty': None,
             'out_qty': None,
             'closing_stock': None,
+            'unit_price': None,
             'date': None,
             'date_movement_pairs': []  # list of (col_idx, date_str, 'IN'|'OUT')
         }
 
+        unit_price_exact = ('unit price', 'unit_price', 'unit rate', 'unit cost', 'purchase price', 'selling price', 'mrp')
+        unit_price_fallback = ('rate', 'price', 'cost')
+
         for idx, h in enumerate(headers):
-            hl = h.lower()
+            hl = h.lower().replace('_', ' ').strip()
+            if any(k in hl for k in unit_price_exact):
+                if roles['unit_price'] is None:
+                    roles['unit_price'] = idx
+            elif roles['unit_price'] is None and any(k == hl or re.search(rf'\b{k}\b', hl) for k in unit_price_fallback):
+                if not any(tot in hl for tot in ('total', 'closing', 'opening', 'value', 'amount')):
+                    roles['unit_price'] = idx
+
             if any(term in hl for term in EXCLUDED_QTY_TERMS):
                 continue
 

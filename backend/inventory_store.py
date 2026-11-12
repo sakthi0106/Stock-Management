@@ -112,6 +112,7 @@ class InventoryDataStore:
             cl_idx = roles.get('closing_stock')
             in_idx = roles.get('in_qty')
             out_idx = roles.get('out_qty')
+            price_idx = roles.get('unit_price')
             date_col_idx = roles.get('date')
             movement_pairs = roles.get('date_movement_pairs', [])
 
@@ -139,7 +140,7 @@ class InventoryDataStore:
                     inferred_role = "out_qty"
                 elif c_i == date_col_idx:
                     inferred_role = "date"
-                elif any(term in col_name.lower() for term in EXCLUDED_QTY_TERMS):
+                elif c_i == price_idx or any(term in col_name.lower() for term in EXCLUDED_QTY_TERMS):
                     inferred_role = "unit_price"
 
                 col_metas.append({
@@ -240,6 +241,15 @@ class InventoryDataStore:
                 in_val = parse_numeric(row[in_idx]) if in_idx is not None and in_idx < len(row) else 0
                 out_val = parse_numeric(row[out_idx]) if out_idx is not None and out_idx < len(row) else 0
 
+                unit_price = None
+                if price_idx is not None and price_idx < len(row) and row[price_idx] is not None:
+                    raw_price = str(row[price_idx]).strip()
+                    parsed_price = parse_numeric(row[price_idx])
+                    if parsed_price is not None:
+                        unit_price = parsed_price
+                    elif raw_price.upper() in ('NA', 'N/A', '-'):
+                        unit_price = 'NA' if raw_price.upper() == 'N/A' else raw_price.upper()
+
                 # Sum date pairs if present for product totals
                 row_pair_in = 0.0
                 row_pair_out = 0.0
@@ -277,6 +287,7 @@ class InventoryDataStore:
                         "description": desc,
                         "category": category,
                         "uom": uom,
+                        "unit_price": unit_price,
                         "opening_stock": op_val or 0,
                         "in_qty": total_in,
                         "out_qty": total_out,
@@ -295,7 +306,7 @@ class InventoryDataStore:
                         "description": desc,
                         "category": category,
                         "uom": uom,
-                        "unit_price": None,
+                        "unit_price": unit_price,
                         "opening_stock": op_val or 0,
                         "in_qty": total_in,
                         "out_qty": total_out,

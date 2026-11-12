@@ -274,7 +274,15 @@ def get_inventory():
         filtered = [p for p in filtered if p.get("stock_status") == status]
 
     reverse = (sort_order == 'desc')
-    filtered = sorted(filtered, key=lambda x: str(x.get(sort_by) or ''), reverse=reverse)
+    if sort_by == 'unit_price':
+        def _price_key(x):
+            v = x.get('unit_price')
+            if isinstance(v, (int, float)):
+                return (0, float(v))
+            return (1, 0.0)
+        filtered = sorted(filtered, key=_price_key, reverse=reverse)
+    else:
+        filtered = sorted(filtered, key=lambda x: str(x.get(sort_by) or ''), reverse=reverse)
 
     total = len(filtered)
     total_pages = math.ceil(total / page_size) if total > 0 else 1
