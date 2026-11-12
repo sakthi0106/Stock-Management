@@ -2,8 +2,6 @@ import logging
 from flask import Flask, jsonify
 from flask_cors import CORS
 from config import Config
-from sheets_client import GoogleSheetsClient
-from inventory_store import InventoryDataStore
 from sync_manager import SyncManager
 from routes import api_bp, init_routes
 
@@ -18,20 +16,16 @@ def create_app():
     app = Flask(__name__)
     CORS(app, resources={r"/api/*": {"origins": "*"}})
 
-    sheets_client = GoogleSheetsClient()
-    store = InventoryDataStore()
-    sync_manager = SyncManager(client=sheets_client, store=store)
-
-    init_routes(sync_manager, store)
+    sync_manager = SyncManager()
+    init_routes(sync_manager)
     app.register_blueprint(api_bp)
 
-    # Start background polling only if configured
     sync_manager.start_poller()
 
     @app.route('/')
     def root():
         return jsonify({
-            "name": "Stock Management API",
+            "name": "Saravanan Electricals Stock Management API",
             "version": "2.0.0",
             "status": "online"
         })
