@@ -1,14 +1,15 @@
 import json
 import logging
 import os
+import threading
 from typing import Dict, List, Any, Optional
 from google.oauth2 import service_account
-from googleapiclient.discovery import build
 from config import Config
 
 logger = logging.getLogger(__name__)
 
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
+_DISCOVERY_LOCK = threading.Lock()
 
 
 class GoogleSheetsClient:
@@ -40,7 +41,17 @@ class GoogleSheetsClient:
                     )
 
             if creds:
-                self._service = build('sheets', 'v4', credentials=creds, cache_discovery=False)
+                with _DISCOVERY_LOCK:
+                    # Lazy-import inside lock to prevent Python 3.14 partial module init race across threads
+                    import googleapiclient.discovery_cache  # noqa: F401
+                    from googleapiclient.discovery import build
+                    self._service = build(
+                        'sheets',
+                        'v4',
+                        credentials=creds,
+                        cache_discovery=False,
+                        static_discovery=False
+                    )
                 self._is_configured = True
                 self._last_error = None
             else:
