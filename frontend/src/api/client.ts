@@ -14,8 +14,10 @@ import {
   AnalysisTaskStatus,
 } from '../types';
 
-const RAW_API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
-const API_BASE_URL = RAW_API_BASE_URL.replace(/\/+$/, '');
+const RAW_API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '/api').trim().replace(/\/+$/, '');
+const API_BASE_URL = RAW_API_BASE_URL.startsWith('http') && !RAW_API_BASE_URL.endsWith('/api')
+  ? `${RAW_API_BASE_URL}/api`
+  : RAW_API_BASE_URL;
 
 class ApiClient {
   private async request<T>(endpoint: string, options?: RequestInit): Promise<T> {
