@@ -1,92 +1,146 @@
-import React from 'react';
-import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
-import { LayoutDashboard, ArrowLeftRight, Package, FileSpreadsheet } from 'lucide-react';
-import { SyncStatusBar } from './components/SyncStatusBar';
-import { Dashboard } from './pages/Dashboard';
-import { DailyMovements } from './pages/DailyMovements';
-import { InventoryList } from './pages/InventoryList';
-import { SpreadsheetSources } from './pages/SpreadsheetSources';
+import React, { lazy, Suspense, useState, useEffect } from 'react';
+import { Sidebar } from './components/Sidebar';
+import { Topbar } from './components/Topbar';
+import { SyncStatus } from './components/SyncStatus';
+import { apiClient } from './api/client';
+import { SyncStatus as SyncStatusType } from './types';
+
+const Dashboard = lazy(() => import('./pages/Dashboard').then(({ Dashboard }) => ({ default: Dashboard })));
+const Inventory = lazy(() => import('./pages/Inventory').then(({ Inventory }) => ({ default: Inventory })));
+const Movements = lazy(() => import('./pages/Movements').then(({ Movements }) => ({ default: Movements })));
+const Reports = lazy(() => import('./pages/Reports').then(({ Reports }) => ({ default: Reports })));
+const DataQuality = lazy(() => import('./pages/DataQuality').then(({ DataQuality }) => ({ default: DataQuality })));
+const SpreadsheetSources = lazy(() => import('./pages/SpreadsheetSources').then(({ SpreadsheetSources }) => ({ default: SpreadsheetSources })));
+const SpreadsheetIntelligence = lazy(() => import('./pages/SpreadsheetIntelligence').then(({ SpreadsheetIntelligence }) => ({ default: SpreadsheetIntelligence })));
 
 export function App() {
+  const [currentTab, setCurrentTab] = useState('dashboard');
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [inventoryStatusFilter, setInventoryStatusFilter] = useState<string | undefined>(undefined);
+  const [selectedSource, setSelectedSource] = useState<string>('active');
+
+  const [syncStatus, setSyncStatus] = useState<SyncStatusType | null>(null);
+  const [syncing, setSyncing] = useState(false);
+
+  const fetchSync = async () => {
+    try {
+      const res = await apiClient.getSyncStatus();
+      setSyncStatus(res);
+    } catch (e) {
+      console.warn('Sync status fetch failed', e);
+    }
+  };
+
+  useEffect(() => {
+    fetchSync();
+    // Conservative 30-second polling interval for live sync status updates without freezing the UI
+    const interval = setInterval(fetchSync, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleManualSync = async () => {
+    setSyncing(true);
+    try {
+      const res = await apiClient.triggerSync(selectedSource);
+      setSyncStatus(res.status);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const handleNavigateToInventory = (statusFilter?: string) => {
+    setInventoryStatusFilter(statusFilter);
+    setCurrentTab('inventory');
+  };
+
+  const currentRefreshKey = syncStatus?.lastSuccess
+    ? `${syncStatus.lastSuccess}_${syncStatus.itemsSynced || 0}`
+    : null;
+
   return (
-    <BrowserRouter>
-      <div className="min-h-screen bg-slate-50 flex flex-col">
-        {/* Navigation Header */}
-        <header className="bg-slate-900 text-white border-b border-slate-800">
-          <div className="max-w-7xl mx-auto px-6 h-14 flex items-center justify-between">
-            <div className="flex items-center space-x-3">
-              <div className="w-8 h-8 rounded-lg bg-emerald-500 flex items-center justify-center font-bold text-slate-950 text-sm">
-                SM
-              </div>
-              <span className="font-semibold text-sm tracking-wide">Stock Management</span>
+    <div className="min-h-screen bg-slate-50 text-slate-800 flex">
+      {/* Sidebar Navigation */}
+      <Sidebar
+        currentTab={currentTab}
+        onSelectTab={(tab) => {
+          setCurrentTab(tab);
+          if (tab !== 'inventory') setInventoryStatusFilter(undefined);
+        }}
+        isOpen={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
+        syncState={syncStatus?.state}
+      />
+
+      {/* Main Content Area */}
+      <div className="flex-1 flex flex-col min-w-0 lg:pl-72">
+        <Topbar
+          onOpenSidebar={() => setSidebarOpen(true)}
+          syncStatus={syncStatus}
+          syncing={syncing}
+          onRefresh={handleManualSync}
+          searchQuery={searchQuery}
+          onSearchChange={(q) => {
+            setSearchQuery(q);
+            if (q && currentTab !== 'inventory') {
+              setCurrentTab('inventory');
+            }
+          }}
+        />
+
+        <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto">
+          <Suspense fallback={
+            <div className="py-24 text-center text-slate-500">
+              <div className="inline-block h-8 w-8 animate-spin rounded-full border-2 border-cyan-600 border-t-transparent mb-3" />
+              <p className="text-sm">Loading page...</p>
             </div>
-
-            <nav className="flex items-center space-x-1">
-              <NavLink
-                to="/"
-                className={({ isActive }) =>
-                  `flex items-center space-x-2 px-3 py-1.5 rounded-lg text-xs font-medium transition ${
-                    isActive ? 'bg-slate-800 text-emerald-400' : 'text-slate-300 hover:bg-slate-800/60'
-                  }`
-                }
-              >
-                <LayoutDashboard className="w-4 h-4" />
-                <span>Dashboard</span>
-              </NavLink>
-
-              <NavLink
-                to="/movements"
-                className={({ isActive }) =>
-                  `flex items-center space-x-2 px-3 py-1.5 rounded-lg text-xs font-medium transition ${
-                    isActive ? 'bg-slate-800 text-emerald-400' : 'text-slate-300 hover:bg-slate-800/60'
-                  }`
-                }
-              >
-                <ArrowLeftRight className="w-4 h-4" />
-                <span>Daily Movements</span>
-              </NavLink>
-
-              <NavLink
-                to="/inventory"
-                className={({ isActive }) =>
-                  `flex items-center space-x-2 px-3 py-1.5 rounded-lg text-xs font-medium transition ${
-                    isActive ? 'bg-slate-800 text-emerald-400' : 'text-slate-300 hover:bg-slate-800/60'
-                  }`
-                }
-              >
-                <Package className="w-4 h-4" />
-                <span>Inventory Catalog</span>
-              </NavLink>
-
-              <NavLink
-                to="/sources"
-                className={({ isActive }) =>
-                  `flex items-center space-x-2 px-3 py-1.5 rounded-lg text-xs font-medium transition ${
-                    isActive ? 'bg-slate-800 text-emerald-400' : 'text-slate-300 hover:bg-slate-800/60'
-                  }`
-                }
-              >
-                <FileSpreadsheet className="w-4 h-4" />
-                <span>Data Sources</span>
-              </NavLink>
-            </nav>
-          </div>
-        </header>
-
-        {/* Global 15s Automatic Sync Status Bar */}
-        <SyncStatusBar />
-
-        {/* Content Body */}
-        <main className="flex-1">
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/movements" element={<DailyMovements />} />
-            <Route path="/inventory" element={<InventoryList />} />
-            <Route path="/sources" element={<SpreadsheetSources />} />
-          </Routes>
+          }>
+            {currentTab === 'dashboard' && (
+              <Dashboard
+                onNavigateToInventory={handleNavigateToInventory}
+                onNavigateToMovements={() => setCurrentTab('movements')}
+                refreshKey={currentRefreshKey}
+                selectedSource={selectedSource}
+                onSourceChange={setSelectedSource}
+              />
+            )}
+            {currentTab === 'inventory' && (
+              <Inventory
+                initialStatusFilter={inventoryStatusFilter}
+                globalSearch={searchQuery}
+                refreshKey={currentRefreshKey}
+                selectedSource={selectedSource}
+                onSourceChange={setSelectedSource}
+              />
+            )}
+            {currentTab === 'movements' && (
+              <Movements
+                refreshKey={currentRefreshKey}
+                selectedSource={selectedSource}
+                onSourceChange={setSelectedSource}
+              />
+            )}
+            {currentTab === 'reports' && <Reports refreshKey={currentRefreshKey} />}
+            {currentTab === 'quality' && <DataQuality refreshKey={currentRefreshKey} />}
+            {currentTab === 'sources' && (
+              <SpreadsheetSources refreshKey={currentRefreshKey} />
+            )}
+            {currentTab === 'intelligence' && (
+              <SpreadsheetIntelligence refreshKey={currentRefreshKey} />
+            )}
+            {currentTab === 'sync' && (
+              <SyncStatus
+                status={syncStatus}
+                syncing={syncing}
+                onRefresh={handleManualSync}
+              />
+            )}
+          </Suspense>
         </main>
       </div>
-    </BrowserRouter>
+    </div>
   );
 }
 
