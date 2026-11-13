@@ -79,48 +79,76 @@ def create_source():
 
 @api_bp.route('/sources/upload', methods=['POST'])
 def upload_source():
-    if 'file' not in request.files:
+    # Support both single file ('file') and multiple files ('files' or multiple 'file')
+    uploaded_files = request.files.getlist('files')
+    if not uploaded_files:
+        uploaded_files = request.files.getlist('file')
+
+    if not uploaded_files or not uploaded_files[0].filename:
         return jsonify({"error": "No file uploaded"}), 400
 
-    file = request.files['file']
-    if not file.filename:
-        return jsonify({"error": "Empty filename"}), 400
-
-    filename = secure_filename(file.filename)
-    if not (filename.endswith('.xlsx') or filename.endswith('.xls')):
-        return jsonify({"error": "Only .xlsx and .xls files are supported"}), 400
-
     os.makedirs(Config.UPLOAD_FOLDER, exist_ok=True)
-    save_path = os.path.join(Config.UPLOAD_FOLDER, f"{int(datetime.now().timestamp())}_{filename}")
-    file.save(save_path)
+    created_sources = []
+    reader = UniversalSpreadsheetReader()
 
-    name = request.form.get('name', '').strip() or filename.rsplit('.', 1)[0]
+    custom_name = request.form.get('name', '').strip()
     period = request.form.get('period', '').strip()
     description = request.form.get('description', 'Uploaded Excel workbook').strip()
+    set_active = request.form.get('is_active', 'true').lower() in ('true', '1')
 
-    try:
-        reader = UniversalSpreadsheetReader()
-        extracted = reader.extract_from_excel(save_path)
-        raw_dict = {sname: sdata.get('values', []) for sname, sdata in extracted.get('sheets', {}).items()}
+    for idx, file in enumerate(uploaded_files):
+        if not file or not file.filename:
+            continue
 
-        store = _sync_manager.register_source(
-            name=name,
-            spreadsheet_url_or_id=f"local_file:{save_path}",
-            period=period,
-            description=description,
-            source_type="excel_upload",
-            is_active=True
-        )
-        store.update_from_raw_sheets(raw_dict, period=period)
-        _sync_manager._record_run(store, "success", None)
+        filename = secure_filename(file.filename)
+        lower_fn = filename.lower()
+        if not (lower_fn.endswith('.xlsx') or lower_fn.endswith('.xlsm')):
+            if lower_fn.endswith('.xls'):
+                return jsonify({
+                    "error": f"'{filename}' is in the legacy .xls format. Please open it in Excel and save as modern Excel Workbook (.xlsx) before uploading."
+                }), 400
+            return jsonify({"error": f"'{filename}' is not an Excel workbook. Only .xlsx files are supported."}), 400
 
-        return jsonify({
-            "source": store.to_source_dict(),
-            "message": "File uploaded and parsed successfully",
-            "sync_success": True
-        }), 201
-    except Exception as e:
-        return jsonify({"error": f"Failed to parse Excel file: {str(e)}"}), 500
+        timestamp = int(datetime.now().timestamp())
+        save_path = os.path.join(Config.UPLOAD_FOLDER, f"{timestamp}_{idx}_{filename}")
+        file.save(save_path)
+
+        # If uploading multiple files together, name each according to its filename
+        if len(uploaded_files) > 1 or not custom_name:
+            source_name = filename.rsplit('.', 1)[0]
+        else:
+            source_name = custom_name
+
+        try:
+            extracted = reader.extract_from_excel(save_path)
+            raw_dict = {sname: sdata.get('values', []) for sname, sdata in extracted.get('sheets', {}).items()}
+
+            # Keep existing sources intact; activate the last uploaded source if requested
+            make_active = set_active and (idx == len(uploaded_files) - 1)
+            store = _sync_manager.register_source(
+                name=source_name,
+                spreadsheet_url_or_id=f"local_file:{save_path}",
+                period=period,
+                description=description,
+                source_type="excel_upload",
+                is_active=make_active
+            )
+            store.update_from_raw_sheets(raw_dict, period=period)
+            _sync_manager._record_run(store, "success", None)
+            created_sources.append(store.to_source_dict())
+        except Exception as e:
+            logger.error(f"Failed parsing uploaded file {filename}: {e}", exc_info=True)
+            return jsonify({"error": f"Failed to parse '{filename}': {str(e)}"}), 500
+
+    _sync_manager._save_registry()
+
+    return jsonify({
+        "source": created_sources[-1] if created_sources else None,
+        "sources": created_sources,
+        "total_uploaded": len(created_sources),
+        "message": f"Successfully uploaded and processed {len(created_sources)} workbook(s).",
+        "sync_success": True
+    }), 201
 
 
 @api_bp.route('/sources/<source_id>', methods=['GET'])

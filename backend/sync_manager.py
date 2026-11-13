@@ -1,3 +1,5 @@
+import os
+import json
 import uuid
 import time
 import logging
@@ -6,13 +8,14 @@ import datetime
 from typing import Dict, List, Any, Optional
 from sheets_client import GoogleSheetsClient
 from inventory_store import InventoryDataStore, extract_spreadsheet_id
+from spreadsheet_reader import UniversalSpreadsheetReader
 from config import Config
 
 logger = logging.getLogger(__name__)
 
 
 class SyncManager:
-    """Manages multi-source Google Sheets registrations and 15-second automatic synchronization."""
+    """Manages multi-source Google Sheets registrations, uploaded Excel workbooks, persistence, and synchronization."""
 
     def __init__(self):
         self.sources: Dict[str, InventoryDataStore] = {}
@@ -35,6 +38,84 @@ class SyncManager:
                 source_id="default_source",
                 is_active=True
             )
+
+        # Restore previously uploaded Excel workbooks from persistent registry
+        self._load_registry()
+
+    def _get_registry_path(self) -> str:
+        os.makedirs(Config.UPLOAD_FOLDER, exist_ok=True)
+        return os.path.join(Config.UPLOAD_FOLDER, "sources_registry.json")
+
+    def _save_registry(self):
+        """Persists source metadata to disk so worker restarts or Render wake-ups preserve sources."""
+        try:
+            reg_path = self._get_registry_path()
+            serializable = []
+            with self._lock:
+                for sid, store in self.sources.items():
+                    if store.source_type == "excel_upload":
+                        serializable.append({
+                            "source_id": store.source_id,
+                            "name": store.name,
+                            "spreadsheet_id": store.spreadsheet_id,
+                            "period": store.period,
+                            "description": store.description,
+                            "source_type": store.source_type,
+                            "is_active": store.is_active,
+                            "status": store.status
+                        })
+            with open(reg_path, 'w', encoding='utf-8') as f:
+                json.dump(serializable, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Could not persist sources registry: {e}")
+
+    def _load_registry(self):
+        """Restores sources and reparses them on startup if files exist on disk."""
+        reg_path = self._get_registry_path()
+        if not os.path.exists(reg_path):
+            return
+
+        try:
+            with open(reg_path, 'r', encoding='utf-8') as f:
+                records = json.load(f)
+
+            reader = UniversalSpreadsheetReader()
+            for r in records:
+                sid = r.get("source_id")
+                clean_path = r.get("spreadsheet_id", "")
+                if clean_path.startswith("local_file:"):
+                    clean_path = clean_path.split("local_file:", 1)[1]
+
+                if not os.path.exists(clean_path):
+                    # Check relative to uploads folder
+                    basename = os.path.basename(clean_path)
+                    candidate = os.path.join(Config.UPLOAD_FOLDER, basename)
+                    if os.path.exists(candidate):
+                        clean_path = candidate
+                    else:
+                        continue
+
+                try:
+                    extracted = reader.extract_from_excel(clean_path)
+                    raw_dict = {sname: sdata.get('values', []) for sname, sdata in extracted.get('sheets', {}).items()}
+
+                    store = self.register_source(
+                        name=r.get("name", "Restored Source"),
+                        spreadsheet_url_or_id=f"local_file:{clean_path}",
+                        period=r.get("period", ""),
+                        description=r.get("description", ""),
+                        source_type="excel_upload",
+                        source_id=sid,
+                        is_active=bool(r.get("is_active", False))
+                    )
+                    store.status = r.get("status", "active")
+                    store.update_from_raw_sheets(raw_dict, period=r.get("period", ""))
+                    logger.info(f"Successfully restored persistent source '{store.name}' ({sid}).")
+                except Exception as ex:
+                    logger.warning(f"Could not restore source {sid}: {ex}")
+
+        except Exception as e:
+            logger.warning(f"Failed loading sources registry: {e}")
 
     def register_source(
         self,
@@ -67,18 +148,80 @@ class SyncManager:
                 store.is_active = 0
 
             self.sources[sid] = store
+            self._save_registry()
             return store
+
+    def get_combined_store(self) -> InventoryDataStore:
+        """Constructs a unified, combined view across all registered and non-archived sources."""
+        combined = InventoryDataStore(
+            source_id="all",
+            name="All Sources (Combined)",
+            spreadsheet_id="all",
+            source_type="combined"
+        )
+        with self._lock:
+            all_prods = []
+            all_movs = []
+            all_worksheets = []
+            all_dyn_cols: Dict[str, List[Dict[str, Any]]] = {}
+            all_dyn_recs: Dict[str, List[Dict[str, Any]]] = {}
+
+            for sid, store in self.sources.items():
+                if store.status == "archived":
+                    continue
+
+                for p in store.products:
+                    p_copy = dict(p)
+                    p_copy["source_id"] = store.source_id
+                    p_copy["source_name"] = store.name
+                    all_prods.append(p_copy)
+
+                for m in store.movements:
+                    m_copy = dict(m)
+                    m_copy["source_id"] = store.source_id
+                    m_copy["source_name"] = store.name
+                    all_movs.append(m_copy)
+
+                for w in store.worksheets:
+                    w_copy = dict(w)
+                    w_copy["source_id"] = store.source_id
+                    w_copy["source_name"] = store.name
+                    all_worksheets.append(w_copy)
+
+                prefix = f"{store.name} - " if len(self.sources) > 1 else ""
+                for sname, cols in store.dynamic_columns.items():
+                    all_dyn_cols[f"{prefix}{sname}"] = cols
+
+                for sname, recs in store.dynamic_records.items():
+                    all_dyn_recs[f"{prefix}{sname}"] = recs
+
+            # Sort movements by date descending
+            all_movs.sort(key=lambda m: str(m.get("date") or ""), reverse=True)
+
+            combined.products = all_prods
+            combined.movements = all_movs
+            combined.worksheets = all_worksheets
+            combined.dynamic_columns = all_dyn_cols
+            combined.dynamic_records = all_dyn_recs
+            return combined
 
     def get_store(self, source_filter: str = "active") -> Optional[InventoryDataStore]:
         with self._lock:
             if not self.sources:
+                if source_filter in ("all", "combined"):
+                    return InventoryDataStore(source_id="all", name="All Sources (Combined)")
                 return None
+
+            # Support unified combined view across all uploaded workbooks and sheets
+            if source_filter in ("all", "combined"):
+                return self.get_combined_store()
+
             if source_filter == "active":
                 if self.active_source_id and self.active_source_id in self.sources:
                     return self.sources[self.active_source_id]
-                # Fallback to first available source
                 first_id = next(iter(self.sources))
                 return self.sources[first_id]
+
             return self.sources.get(source_filter)
 
     def activate_source(self, source_id: str) -> bool:
@@ -88,17 +231,30 @@ class SyncManager:
             for sid, store in self.sources.items():
                 store.is_active = 1 if sid == source_id else 0
             self.active_source_id = source_id
+            self._save_registry()
             return True
 
     def delete_source(self, source_id: str) -> bool:
         with self._lock:
             if source_id not in self.sources:
                 return False
-            self.sources.pop(source_id)
+            store = self.sources.pop(source_id)
+
+            # Clean up local file if it was an uploaded Excel workbook
+            if store.source_type == "excel_upload" and store.spreadsheet_id.startswith("local_file:"):
+                fpath = store.spreadsheet_id.split("local_file:", 1)[1]
+                if os.path.exists(fpath):
+                    try:
+                        os.remove(fpath)
+                    except Exception:
+                        pass
+
             if self.active_source_id == source_id:
                 self.active_source_id = next(iter(self.sources)) if self.sources else None
                 if self.active_source_id:
                     self.sources[self.active_source_id].is_active = 1
+
+            self._save_registry()
             return True
 
     def start_poller(self):
@@ -121,7 +277,6 @@ class SyncManager:
         self._is_paused = False
 
     def _poll_loop(self):
-        # Allow web server port binding to complete before running initial background sync
         time.sleep(2)
         if self.active_source_id:
             self.sync_source(self.active_source_id)
@@ -140,7 +295,6 @@ class SyncManager:
         if store.source_type == "excel_upload":
             return True
 
-        # Avoid concurrent Google API calls even if Sync Now is clicked repeatedly
         if self._is_syncing:
             return False
 

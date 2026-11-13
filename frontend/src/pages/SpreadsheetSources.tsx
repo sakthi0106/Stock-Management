@@ -35,8 +35,8 @@ const AddSourceModal: React.FC<AddModalProps> = ({ onClose, onAdded }) => {
     poll_interval_seconds: 30,
   });
 
-  // Upload state
-  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  // Upload state (Supports single and multiple workbooks)
+  const [uploadFiles, setUploadFiles] = useState<File[]>([]);
   const [uploadName, setUploadName] = useState('');
   const [uploadPeriod, setUploadPeriod] = useState('');
   const [uploadDescription, setUploadDescription] = useState('');
@@ -76,16 +76,20 @@ const AddSourceModal: React.FC<AddModalProps> = ({ onClose, onAdded }) => {
 
   const handleUploadSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!uploadFile) {
-      setError('Please select an Excel (.xlsx or .xls) file to upload.');
+    if (uploadFiles.length === 0) {
+      setError('Please select at least one Excel (.xlsx) file to upload.');
       return;
     }
     setSaving(true);
     setError('');
     try {
       const fd = new FormData();
-      fd.append('file', uploadFile);
-      fd.append('name', uploadName || uploadFile.name.replace(/\.[^/.]+$/, ''));
+      uploadFiles.forEach(file => {
+        fd.append('files', file);
+      });
+      if (uploadFiles.length === 1) {
+        fd.append('name', uploadName || uploadFiles[0].name.replace(/\.[^/.]+$/, ''));
+      }
       fd.append('period', uploadPeriod);
       fd.append('description', uploadDescription);
       fd.append('is_active', uploadIsActive ? 'true' : 'false');
@@ -94,7 +98,7 @@ const AddSourceModal: React.FC<AddModalProps> = ({ onClose, onAdded }) => {
       onAdded();
       onClose();
     } catch (err: any) {
-      setError(err.message || 'Failed to upload Excel workbook.');
+      setError(err.message || 'Failed to upload Excel workbook(s).');
     } finally {
       setSaving(false);
     }
@@ -262,9 +266,12 @@ const AddSourceModal: React.FC<AddModalProps> = ({ onClose, onAdded }) => {
           </form>
         ) : (
           <form onSubmit={handleUploadSubmit} className="p-5 space-y-4">
-            {/* File Drop Area */}
+            {/* Multi-File Drop Area */}
             <div>
-              <label className="block text-xs font-medium text-slate-600 mb-1.5">Select Excel File (.xlsx or .xls) *</label>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-xs font-medium text-slate-600">Select Excel File(s) (.xlsx) *</label>
+                <span className="text-[11px] text-cyan-600 font-medium">Multi-file upload enabled</span>
+              </div>
               <div
                 onClick={() => fileInputRef.current?.click()}
                 className="border-2 border-dashed border-slate-300 hover:border-cyan-500 rounded-2xl p-6 text-center cursor-pointer bg-slate-50/50 hover:bg-cyan-50/30 transition-all"
@@ -272,40 +279,58 @@ const AddSourceModal: React.FC<AddModalProps> = ({ onClose, onAdded }) => {
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept=".xlsx, .xls"
+                  accept=".xlsx, .xlsm"
+                  multiple
                   className="hidden"
                   onChange={e => {
-                    const f = e.target.files?.[0];
-                    if (f) {
-                      setUploadFile(f);
-                      if (!uploadName) setUploadName(f.name.replace(/\.[^/.]+$/, ''));
+                    const files = Array.from(e.target.files || []);
+                    if (files.length > 0) {
+                      setUploadFiles(files);
+                      if (files.length === 1 && !uploadName) {
+                        setUploadName(files[0].name.replace(/\.[^/.]+$/, ''));
+                      }
                     }
                   }}
                 />
                 <FileSpreadsheet size={36} className="mx-auto text-cyan-600 mb-2" />
-                {uploadFile ? (
+                {uploadFiles.length > 0 ? (
                   <div>
-                    <p className="text-sm font-semibold text-slate-800">{uploadFile.name}</p>
-                    <p className="text-xs text-slate-400 mt-0.5">{(uploadFile.size / 1024).toFixed(1)} KB — Click to change</p>
+                    {uploadFiles.length === 1 ? (
+                      <>
+                        <p className="text-sm font-semibold text-slate-800">{uploadFiles[0].name}</p>
+                        <p className="text-xs text-slate-400 mt-0.5">{(uploadFiles[0].size / 1024).toFixed(1)} KB — Click to change</p>
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-sm font-semibold text-cyan-800">{uploadFiles.length} Excel workbooks selected</p>
+                        <p className="text-xs text-slate-500 mt-1">
+                          {uploadFiles.map(f => f.name).slice(0, 3).join(', ')}
+                          {uploadFiles.length > 3 ? ` + ${uploadFiles.length - 3} more` : ''}
+                        </p>
+                        <p className="text-[11px] text-slate-400 mt-1">Click to select different files</p>
+                      </>
+                    )}
                   </div>
                 ) : (
                   <div>
-                    <p className="text-sm font-medium text-slate-700">Click to choose Excel workbook</p>
-                    <p className="text-xs text-slate-400 mt-1">Supports multi-worksheet .xlsx and .xls files</p>
+                    <p className="text-sm font-medium text-slate-700">Click to choose Excel workbook(s)</p>
+                    <p className="text-xs text-slate-400 mt-1">Select one or multiple modern .xlsx files (all workbooks are preserved)</p>
                   </div>
                 )}
               </div>
             </div>
 
-            <div>
-              <label className="block text-xs font-medium text-slate-600 mb-1">Source Name</label>
-              <input
-                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-cyan-300"
-                placeholder="e.g. September 2026 Master"
-                value={uploadName}
-                onChange={e => setUploadName(e.target.value)}
-              />
-            </div>
+            {uploadFiles.length <= 1 && (
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">Source Name</label>
+                <input
+                  className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-cyan-300"
+                  placeholder="e.g. September 2026 Master"
+                  value={uploadName}
+                  onChange={e => setUploadName(e.target.value)}
+                />
+              </div>
+            )}
 
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1">Period (optional)</label>
@@ -326,6 +351,10 @@ const AddSourceModal: React.FC<AddModalProps> = ({ onClose, onAdded }) => {
                 value={uploadDescription}
                 onChange={e => setUploadDescription(e.target.value)}
               />
+            </div>
+
+            <div className="p-3 bg-cyan-50/60 border border-cyan-100 rounded-xl text-xs text-cyan-900 leading-relaxed">
+              <span className="font-semibold text-cyan-800">Note:</span> Old data is not deleted when uploading new files. You can browse each workbook individually or select <strong>&quot;All Sources (Combined)&quot;</strong> in the dashboard to see all stock consolidated.
             </div>
 
             <div className="flex items-center gap-2">
@@ -351,11 +380,11 @@ const AddSourceModal: React.FC<AddModalProps> = ({ onClose, onAdded }) => {
               </button>
               <button
                 type="submit"
-                disabled={saving || !uploadFile}
+                disabled={saving || uploadFiles.length === 0}
                 className="flex-1 bg-cyan-600 text-white rounded-xl py-2 text-sm font-medium hover:bg-cyan-700 disabled:opacity-50 flex items-center justify-center gap-2"
               >
                 {saving ? <RefreshCw size={14} className="animate-spin" /> : <Upload size={14} />}
-                {saving ? 'Processing...' : 'Upload & Process'}
+                {saving ? 'Processing...' : uploadFiles.length > 1 ? `Upload ${uploadFiles.length} Workbooks` : 'Upload & Process'}
               </button>
             </div>
           </form>

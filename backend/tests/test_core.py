@@ -1,5 +1,7 @@
 import pytest
 import sys
+import io
+import openpyxl
 from pathlib import Path
 
 backend_dir = Path(__file__).resolve().parent.parent
@@ -7,6 +9,7 @@ sys.path.insert(0, str(backend_dir))
 
 from spreadsheet_parser import UniversalParser, parse_numeric, parse_date_string
 from inventory_store import InventoryDataStore, extract_spreadsheet_id
+from sync_manager import SyncManager
 from app import create_app
 
 
@@ -91,6 +94,44 @@ def test_unit_price_extraction_and_sorting():
     assert by_part["P-200"]["unit_price"] == 450
     assert by_part["P-300"]["unit_price"] == "NA"
     assert by_part["P-400"]["unit_price"] == "-"
-    # Ensure unit price did not leak into stock quantities
     assert by_part["P-100"]["current_stock"] == 15
     assert by_part["P-200"]["opening_stock"] == 20
+
+
+def test_multi_source_and_combined_view():
+    sm = SyncManager()
+
+    # Source 1: Sept Inventory
+    s1 = sm.register_source(name="Sept Inventory", spreadsheet_url_or_id="s1_id", source_type="excel_upload", is_active=True)
+    s1.update_from_raw_sheets({
+        "Sept": [
+            ["Part No", "Description", "Opening Stock", "Closing Stock"],
+            ["ITEM-01", "Relay 12V", 10, 25]
+        ]
+    })
+
+    # Source 2: Oct Inventory
+    s2 = sm.register_source(name="Oct Inventory", spreadsheet_url_or_id="s2_id", source_type="excel_upload", is_active=True)
+    s2.update_from_raw_sheets({
+        "Oct": [
+            ["Part No", "Description", "Opening Stock", "Closing Stock"],
+            ["ITEM-02", "Contactor 24V", 5, 12]
+        ]
+    })
+
+    # Both sources must exist simultaneously in SyncManager
+    assert len(sm.sources) >= 2
+    assert sm.get_store(s1.source_id) is not None
+    assert sm.get_store(s2.source_id) is not None
+
+    # 'all' must return combined store with products from BOTH sources
+    combined = sm.get_store("all")
+    assert combined is not None
+    assert len(combined.products) >= 2
+    part_numbers = [p["part_no"] for p in combined.products]
+    assert "ITEM-01" in part_numbers
+    assert "ITEM-02" in part_numbers
+
+    # Dashboard summary of combined view
+    summary = combined.get_dashboard_summary()
+    assert summary["total_products"] >= 2
