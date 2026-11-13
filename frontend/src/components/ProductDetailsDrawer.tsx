@@ -92,7 +92,7 @@ export const ProductDetailsDrawer: React.FC<ProductDetailsDrawerProps> = ({ prod
                 <span className="text-slate-900 font-medium">{product.category}</span>
               </div>
               <div className="flex justify-between py-1 border-b border-slate-200">
-                <span className="text-slate-500">Opening Balance (Month):</span>
+                <span className="text-slate-500">Opening Stock:</span>
                 <span className="text-slate-900 font-mono font-semibold">{product.opening_stock !== null ? String(product.opening_stock) : '—'} {product.uom}</span>
               </div>
               <div className="flex justify-between py-1 border-b border-slate-200">
@@ -108,23 +108,6 @@ export const ProductDetailsDrawer: React.FC<ProductDetailsDrawerProps> = ({ prod
                 <span className="text-cyan-700 font-medium">{product.source_sheet} (Row {product.source_row})</span>
               </div>
             </div>
-
-            {/* Extra Sheet Fields (Amount Strictly Excluded) */}
-            {Object.keys(product.extra_fields || {}).length > 0 && (
-              <div>
-                <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">
-                  Additional Sheet Attributes
-                </h4>
-                <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2 text-xs">
-                  {Object.entries(product.extra_fields).map(([k, v]) => (
-                    <div key={k} className="flex justify-between py-1 border-b border-slate-200 last:border-0">
-                      <span className="text-slate-500">{k}:</span>
-                      <span className="text-slate-900 font-medium">{v !== null ? String(v) : '—'}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
 
             {/* Stock Movement History */}
             <div>

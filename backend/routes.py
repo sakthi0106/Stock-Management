@@ -302,13 +302,13 @@ def get_inventory():
         filtered = [p for p in filtered if p.get("stock_status") == status]
 
     reverse = (sort_order == 'desc')
-    if sort_by == 'unit_price':
-        def _price_key(x):
-            v = x.get('unit_price')
+    if sort_by in ('unit_price', 'opening_stock', 'current_stock'):
+        def _num_key(x):
+            v = x.get(sort_by)
             if isinstance(v, (int, float)):
                 return (0, float(v))
             return (1, 0.0)
-        filtered = sorted(filtered, key=_price_key, reverse=reverse)
+        filtered = sorted(filtered, key=_num_key, reverse=reverse)
     else:
         filtered = sorted(filtered, key=lambda x: str(x.get(sort_by) or ''), reverse=reverse)
 
@@ -395,8 +395,9 @@ def sync_status():
 @api_bp.route('/sync/refresh', methods=['POST'])
 def sync_refresh():
     source = request.args.get('source', 'active').strip()
-    threading.Thread(target=_sync_manager.sync_source, args=(source, True), daemon=True).start()
-    return jsonify({"success": True, "status": _sync_manager.get_status(), "message": "Sync started"})
+    # Synchronously sync source(s) and return immediately updated status
+    success = _sync_manager.sync_source(source, force=True)
+    return jsonify({"success": success, "status": _sync_manager.get_status(), "message": "Sync completed successfully" if success else "Sync finished with notices"})
 
 
 @api_bp.route('/sync/pause', methods=['POST'])

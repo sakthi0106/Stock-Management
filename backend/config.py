@@ -19,7 +19,7 @@ class Config:
     GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON', '').strip()
 
     # Polling frequency (seconds) - default 60s to prevent CPU & memory thrashing on 512MB RAM
-    SYNC_INTERVAL_SECONDS = int(os.environ.get('SYNC_INTERVAL_SECONDS', 60))
+    SYNC_INTERVAL_SECONDS = int(os.environ.get('SYNC_INTERVAL_SECONDS', 30))
 
     # Uploads folder
     UPLOAD_FOLDER = backend_dir / 'uploads'

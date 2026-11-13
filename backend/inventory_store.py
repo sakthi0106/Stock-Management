@@ -81,7 +81,7 @@ class InventoryDataStore:
         new_dyn_cols: Dict[str, List[Dict[str, Any]]] = {}
         new_dyn_recs: Dict[str, List[Dict[str, Any]]] = {}
 
-        seen_product_keys = set()
+        seen_products: Dict[str, Dict[str, Any]] = {}
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
         use_period = period or self.period
 
@@ -301,16 +301,15 @@ class InventoryDataStore:
                     })
 
                 prod_key = f"{sheet_name}:{part_no}"
-                if prod_key not in seen_product_keys:
-                    seen_product_keys.add(prod_key)
-                    new_products.append({
+                if prod_key not in seen_products:
+                    item_record = {
                         "product_id": part_no,
                         "part_no": part_no,
                         "description": desc,
                         "category": category,
                         "uom": uom,
                         "unit_price": unit_price,
-                        "opening_stock": op_val or 0,
+                        "opening_stock": op_val if op_val is not None else 0,
                         "in_qty": total_in,
                         "out_qty": total_out,
                         "current_stock": current_stock,
@@ -320,7 +319,24 @@ class InventoryDataStore:
                         "source_row": header_rows_consumed + r_idx + 1,
                         "extra_fields": extra_fields,
                         "validation_flags": []
-                    })
+                    }
+                    seen_products[prod_key] = item_record
+                    new_products.append(item_record)
+                else:
+                    # Update existing product with latest row's data so the latest opening stock, closing stock, and price reflect
+                    existing_item = seen_products[prod_key]
+                    if op_val is not None:
+                        existing_item["opening_stock"] = op_val
+                    if cl_val is not None:
+                        existing_item["current_stock"] = cl_val
+                        existing_item["stock_status"] = stock_status
+                    if unit_price is not None:
+                        existing_item["unit_price"] = unit_price
+                    if desc and (not existing_item.get("description") or existing_item["description"] == existing_item["part_no"]):
+                        existing_item["description"] = desc
+                    existing_item["in_qty"] += total_in
+                    existing_item["out_qty"] += total_out
+                    existing_item["source_row"] = header_rows_consumed + r_idx + 1
 
                 # 1. Extract movements from date-paired columns
                 if movement_pairs:

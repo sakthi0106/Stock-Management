@@ -210,7 +210,7 @@ class UniversalParser:
                 roles['category'] = idx
             elif roles['uom'] is None and any(k in hl for k in ['uom', 'unit', 'measure']):
                 roles['uom'] = idx
-            elif roles['opening_stock'] is None and any(k in hl for k in ['opening', 'op. stock', 'initial balance', 'open stock']):
+            elif roles['opening_stock'] is None and any(k in hl for k in ['opening', 'op. stock', 'op stock', 'op.stock', 'open stock', 'opening stock', 'opening balance', 'opening bal', 'op bal', 'op. bal', 'initial balance', 'initial stock', 'start stock', 'starting stock', 'opening qty', 'op qty']):
                 roles['opening_stock'] = idx
             elif roles['closing_stock'] is None and any(k in hl for k in ['closing', 'cl. stock', 'balance', 'available', 'current stock']):
                 roles['closing_stock'] = idx

@@ -37,23 +37,6 @@ export const InventoryCard: React.FC<InventoryCardProps> = ({ product, onSelect 
             <span>{product.category}</span>
           </div>
         </div>
-
-        {/* Dynamic Spreadsheet Attributes */}
-        {product.extra_fields && Object.keys(product.extra_fields).length > 0 && (
-          <div className="mt-2.5 flex flex-wrap gap-1">
-            {Object.entries(product.extra_fields)
-              .filter(([k]) => {
-                const lk = k.toLowerCase();
-                return !['part no', 'description', 'category', 'uom', 'unit price', 'opening stock', 'closing stock', 'current stock', 'si no'].some(s => lk.includes(s));
-              })
-              .slice(0, 2)
-              .map(([k, v]) => (
-                <span key={k} className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-50/70 border border-cyan-100 text-cyan-800 font-medium">
-                  {k}: <strong className="font-mono">{String(v)}</strong>
-                </span>
-              ))}
-          </div>
-        )}
       </div>
 
       <div className="mt-5 pt-3.5 border-t border-slate-100 flex items-end justify-between">

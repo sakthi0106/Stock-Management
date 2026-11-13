@@ -135,3 +135,20 @@ def test_multi_source_and_combined_view():
     # Dashboard summary of combined view
     summary = combined.get_dashboard_summary()
     assert summary["total_products"] >= 2
+
+
+def test_latest_opening_stock_reflection():
+    store = InventoryDataStore(source_id="latest_op_test", name="Latest Op Test")
+    raw_sheets = {
+        "November 2026": [
+            ["Part No", "Description", "Opening Stock", "Closing Stock"],
+            ["PART-A", "Capacitor 100uF", 50, 45],
+            ["PART-A", "Capacitor 100uF", 90, 85],  # Later row with updated/latest opening stock
+        ]
+    }
+    store.update_from_raw_sheets(raw_sheets)
+    assert len(store.products) == 1
+    prod = store.products[0]
+    # Latest opening stock should be 90 (from later row)
+    assert prod["opening_stock"] == 90
+    assert prod["current_stock"] == 85

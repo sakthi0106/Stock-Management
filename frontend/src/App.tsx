@@ -22,6 +22,7 @@ export function App() {
 
   const [syncStatus, setSyncStatus] = useState<SyncStatusType | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const [manualRefreshKey, setManualRefreshKey] = useState(0);
 
   const fetchSync = async () => {
     try {
@@ -34,8 +35,8 @@ export function App() {
 
   useEffect(() => {
     fetchSync();
-    // Conservative 30-second polling interval for live sync status updates without freezing the UI
-    const interval = setInterval(fetchSync, 30000);
+    // 10-second polling interval for live sync status updates so changes in Google Sheets reflect automatically
+    const interval = setInterval(fetchSync, 10000);
     return () => clearInterval(interval);
   }, []);
 
@@ -44,6 +45,7 @@ export function App() {
     try {
       const res = await apiClient.triggerSync(selectedSource);
       setSyncStatus(res.status);
+      setManualRefreshKey((prev) => prev + 1);
     } catch (e) {
       console.error(e);
     } finally {
@@ -56,9 +58,7 @@ export function App() {
     setCurrentTab('inventory');
   };
 
-  const currentRefreshKey = syncStatus?.lastSuccess
-    ? `${syncStatus.lastSuccess}_${syncStatus.itemsSynced || 0}`
-    : null;
+  const currentRefreshKey = `${syncStatus?.lastSuccess || 'init'}_${syncStatus?.itemsSynced || 0}_${manualRefreshKey}`;
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 flex">

@@ -288,16 +288,29 @@ class SyncManager:
 
     def _poll_loop(self):
         time.sleep(2)
-        if self.active_source_id:
-            self.sync_source(self.active_source_id)
         while not self._stop_event.is_set():
+            if not self._is_paused:
+                with self._lock:
+                    g_sids = [
+                        sid for sid, s in self.sources.items()
+                        if s.source_type == "google_sheets" and s.status != "archived"
+                    ]
+                for sid in g_sids:
+                    if self._stop_event.is_set() or self._is_paused:
+                        break
+                    self.sync_source(sid)
             time.sleep(self.sync_interval)
-            if not self._is_paused and self.active_source_id:
-                store = self.get_store("active")
-                if store and store.source_type != "excel_upload":
-                    self.sync_source(store.source_id)
 
     def sync_source(self, source_id: str = "active", force: bool = False) -> bool:
+        if source_id in ("all", "combined"):
+            with self._lock:
+                g_sids = [sid for sid, s in self.sources.items() if s.source_type == "google_sheets" and s.status != "archived"]
+            success = True
+            for sid in g_sids:
+                if not self.sync_source(sid, force=force):
+                    success = False
+            return success
+
         store = self.get_store(source_id)
         if not store:
             return False
