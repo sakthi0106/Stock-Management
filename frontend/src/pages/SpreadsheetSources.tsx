@@ -480,6 +480,16 @@ const SourceCard: React.FC<SourceCardProps> = ({ source, onRefresh }) => {
     setActionError('');
     try {
       await apiClient.deleteSource(source.source_id);
+      const cached = localStorage.getItem('stock_mgmt_registered_sources');
+      if (cached) {
+        try {
+          const list = JSON.parse(cached);
+          const filtered = list.filter((item: any) => item.spreadsheet_url_or_id !== source.spreadsheet_id && item.name !== source.name);
+          localStorage.setItem('stock_mgmt_registered_sources', JSON.stringify(filtered));
+        } catch {
+          // ignore
+        }
+      }
       onRefresh();
     } catch (e: any) {
       setActionError(e.message || 'Failed to delete');
@@ -722,7 +732,39 @@ export function SpreadsheetSources({ refreshKey }: Props) {
     setError('');
     try {
       const res = await apiClient.getSources(true);
-      setSources(res.sources);
+      if (res.sources && res.sources.length > 0) {
+        setSources(res.sources);
+        const googleSources = res.sources
+          .filter(s => s.spreadsheet_id && !s.spreadsheet_id.startsWith('local_file:'))
+          .map(s => ({
+            name: s.name,
+            spreadsheet_url_or_id: s.spreadsheet_id,
+            period: s.period || '',
+            description: s.description || '',
+            is_active: s.is_active === 1,
+          }));
+        if (googleSources.length > 0) {
+          localStorage.setItem('stock_mgmt_registered_sources', JSON.stringify(googleSources));
+        }
+      } else {
+        const cached = localStorage.getItem('stock_mgmt_registered_sources');
+        if (cached) {
+          try {
+            const savedList = JSON.parse(cached);
+            if (Array.isArray(savedList) && savedList.length > 0) {
+              for (const item of savedList) {
+                await apiClient.createSource(item).catch(() => {});
+              }
+              const reloaded = await apiClient.getSources(true);
+              setSources(reloaded.sources);
+              return;
+            }
+          } catch {
+            // ignore JSON parse errors
+          }
+        }
+        setSources([]);
+      }
     } catch (e: any) {
       setError(e.message || 'Failed to load sources');
     } finally {

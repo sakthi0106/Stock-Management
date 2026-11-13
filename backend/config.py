@@ -18,8 +18,8 @@ class Config:
     GOOGLE_SHEETS_SPREADSHEET_ID = os.environ.get('GOOGLE_SHEETS_SPREADSHEET_ID', '').strip()
     GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON', '').strip()
 
-    # Polling frequency (seconds)
-    SYNC_INTERVAL_SECONDS = int(os.environ.get('SYNC_INTERVAL_SECONDS', 15))
+    # Polling frequency (seconds) - default 60s to prevent CPU & memory thrashing on 512MB RAM
+    SYNC_INTERVAL_SECONDS = int(os.environ.get('SYNC_INTERVAL_SECONDS', 60))
 
     # Uploads folder
     UPLOAD_FOLDER = backend_dir / 'uploads'

@@ -55,7 +55,7 @@ export const Topbar: React.FC<TopbarProps> = ({
               <ShieldCheck size={14} className="text-emerald-600" />
               <span className="text-slate-700 font-medium">{syncStatus?.source || "Google Sheets Live"}</span>
             </>
-          ) : syncStatus?.source && syncStatus.source !== 'Primary Stock Sheet' && syncStatus.source !== 'Default Source' ? (
+          ) : syncStatus?.source && syncStatus.source !== 'No Active Source' ? (
             <>
               <ShieldCheck size={14} className="text-cyan-600" />
               <span className="text-slate-700 font-medium">{syncStatus.source}</span>

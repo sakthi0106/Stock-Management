@@ -1,4 +1,5 @@
 import re
+import gc
 import uuid
 import datetime
 import logging
@@ -33,7 +34,7 @@ def infer_column_type(values: List[Any]) -> str:
 class InventoryDataStore:
     """Thread-safe In-Memory Data Store holding dynamic Google Sheets rows, columns, products, and movements."""
 
-    def __init__(self, source_id: str = "default", name: str = "Primary Stock Sheet", spreadsheet_id: str = "", source_type: str = "google_sheets"):
+    def __init__(self, source_id: str = "default", name: str = "Untitled Source", spreadsheet_id: str = "", source_type: str = "google_sheets"):
         self.source_id = source_id
         self.name = name
         self.spreadsheet_id = spreadsheet_id
@@ -221,16 +222,17 @@ class InventoryDataStore:
 
                 if not part_no and not desc:
                     # Still preserve the dynamic record so all rows are visible in Spreadsheet Intelligence
-                    sheet_dyn_records.append({
-                        "id": r_idx + 1,
-                        "source_id": self.source_id,
-                        "sheet_name": sheet_name,
-                        "row_index": header_rows_consumed + r_idx + 1,
-                        "raw_data": raw_data,
-                        "inferred_data": raw_data,
-                        "created_at": now_iso,
-                        "updated_at": now_iso
-                    })
+                    if len(sheet_dyn_records) < 300:
+                        sheet_dyn_records.append({
+                            "id": r_idx + 1,
+                            "source_id": self.source_id,
+                            "sheet_name": sheet_name,
+                            "row_index": header_rows_consumed + r_idx + 1,
+                            "raw_data": raw_data,
+                            "inferred_data": raw_data,
+                            "created_at": now_iso,
+                            "updated_at": now_iso
+                        })
                     continue
 
                 if not part_no:
@@ -276,26 +278,27 @@ class InventoryDataStore:
                     else:
                         stock_status = "In Stock"
 
-                sheet_dyn_records.append({
-                    "id": r_idx + 1,
-                    "source_id": self.source_id,
-                    "sheet_name": sheet_name,
-                    "row_index": header_rows_consumed + r_idx + 1,
-                    "raw_data": raw_data,
-                    "inferred_data": {
-                        "part_no": part_no,
-                        "description": desc,
-                        "category": category,
-                        "uom": uom,
-                        "unit_price": unit_price,
-                        "opening_stock": op_val or 0,
-                        "in_qty": total_in,
-                        "out_qty": total_out,
-                        "current_stock": current_stock
-                    },
-                    "created_at": now_iso,
-                    "updated_at": now_iso
-                })
+                if len(sheet_dyn_records) < 300:
+                    sheet_dyn_records.append({
+                        "id": r_idx + 1,
+                        "source_id": self.source_id,
+                        "sheet_name": sheet_name,
+                        "row_index": header_rows_consumed + r_idx + 1,
+                        "raw_data": raw_data,
+                        "inferred_data": {
+                            "part_no": part_no,
+                            "description": desc,
+                            "category": category,
+                            "uom": uom,
+                            "unit_price": unit_price,
+                            "opening_stock": op_val or 0,
+                            "in_qty": total_in,
+                            "out_qty": total_out,
+                            "current_stock": current_stock
+                        },
+                        "created_at": now_iso,
+                        "updated_at": now_iso
+                    })
 
                 prod_key = f"{sheet_name}:{part_no}"
                 if prod_key not in seen_product_keys:
@@ -433,7 +436,8 @@ class InventoryDataStore:
 
         # Atomic swap
         self.products = new_products
-        self.movements = sorted(new_movements, key=lambda m: (m['date'], m['part_no']), reverse=True)
+        # Cap movements to 3000 to prevent unbounded RAM growth on Render
+        self.movements = sorted(new_movements, key=lambda m: (m['date'], m['part_no']), reverse=True)[:3000]
         self.worksheets = new_worksheets
         self.dynamic_columns = new_dyn_cols
         self.dynamic_records = new_dyn_recs
@@ -443,6 +447,7 @@ class InventoryDataStore:
         self.analysis_status = "completed"
         self.last_analyzed_at = now_iso
         self.updated_at = now_iso
+        gc.collect()
 
     def to_source_dict(self) -> Dict[str, Any]:
         return {
