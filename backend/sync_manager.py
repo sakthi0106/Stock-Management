@@ -34,7 +34,7 @@ class SyncManager:
         self._cached_combined: Optional[InventoryDataStore] = None
         self._dirty_combined: bool = True
 
-        # Restore all previously registered sources (Google Sheets & Excel) from disk
+        # Restore all previously registered sources (Google Sheets & Excel) permanently from disk
         self._load_registry()
 
     def _get_registry_path(self) -> str:
@@ -42,7 +42,7 @@ class SyncManager:
         return os.path.join(Config.UPLOAD_FOLDER, "sources_registry.json")
 
     def _save_registry(self):
-        """Persists source metadata to disk so worker restarts or Render wake-ups preserve sources."""
+        """Persists source metadata and complete parsed product/sheet data to disk so restarts preserve data permanently."""
         try:
             reg_path = self._get_registry_path()
             serializable = []
@@ -56,15 +56,23 @@ class SyncManager:
                         "description": store.description,
                         "source_type": store.source_type,
                         "is_active": store.is_active,
-                        "status": store.status
+                        "status": store.status,
+                        "last_sync_at": store.last_sync_at,
+                        "last_sync_status": store.last_sync_status,
+                        "last_sync_error": store.last_sync_error,
+                        "products": store.products,
+                        "movements": store.movements[:1000],
+                        "worksheets": store.worksheets,
+                        "dynamic_columns": store.dynamic_columns,
+                        "dynamic_records": {s: recs[:200] for s, recs in store.dynamic_records.items()}
                     })
             with open(reg_path, 'w', encoding='utf-8') as f:
-                json.dump(serializable, f, indent=2)
+                json.dump(serializable, f)
         except Exception as e:
             logger.warning(f"Could not persist sources registry: {e}")
 
     def _load_registry(self):
-        """Restores sources and reparses them on startup if files exist on disk."""
+        """Restores sources and full parsed product/sheet records on startup permanently."""
         reg_path = self._get_registry_path()
         if os.path.exists(reg_path):
             try:
@@ -81,52 +89,42 @@ class SyncManager:
                     is_active = bool(r.get("is_active", False))
                     status = r.get("status", "active")
 
-                    if stype == "google_sheets":
-                        sheet_id = r.get("spreadsheet_id", "")
-                        if sheet_id:
-                            store = self.register_source(
-                                name=name,
-                                spreadsheet_url_or_id=sheet_id,
-                                period=period,
-                                description=desc,
-                                source_type="google_sheets",
-                                source_id=sid,
-                                is_active=is_active
-                            )
-                            store.status = status
-                            logger.info(f"Restored Google Sheets source '{name}' ({sid}).")
+                    store = self.register_source(
+                        name=name,
+                        spreadsheet_url_or_id=r.get("spreadsheet_id", ""),
+                        period=period,
+                        description=desc,
+                        source_type=stype,
+                        source_id=sid,
+                        is_active=is_active
+                    )
+                    store.status = status
+                    store.last_sync_at = r.get("last_sync_at")
+                    store.last_sync_status = r.get("last_sync_status", "success")
+                    store.last_sync_error = r.get("last_sync_error")
 
-                    elif stype == "excel_upload":
+                    # Permanently restore cached parsed products and worksheets
+                    cached_prods = r.get("products")
+                    if cached_prods:
+                        store.products = cached_prods
+                        store.movements = r.get("movements", [])
+                        store.worksheets = r.get("worksheets", [])
+                        store.dynamic_columns = r.get("dynamic_columns", {})
+                        store.dynamic_records = r.get("dynamic_records", {})
+                        logger.info(f"Permanently restored {len(cached_prods)} items and {len(store.worksheets)} worksheets for '{name}' ({sid}).")
+
+                    if stype == "excel_upload" and not cached_prods:
                         clean_path = r.get("spreadsheet_id", "")
                         if clean_path.startswith("local_file:"):
                             clean_path = clean_path.split("local_file:", 1)[1]
 
-                        if not os.path.exists(clean_path):
-                            basename = os.path.basename(clean_path)
-                            candidate = os.path.join(Config.UPLOAD_FOLDER, basename)
-                            if os.path.exists(candidate):
-                                clean_path = candidate
-                            else:
-                                continue
-
-                        try:
-                            extracted = reader.extract_from_excel(clean_path)
-                            raw_dict = {sname: sdata.get('values', []) for sname, sdata in extracted.get('sheets', {}).items()}
-
-                            store = self.register_source(
-                                name=name,
-                                spreadsheet_url_or_id=f"local_file:{clean_path}",
-                                period=period,
-                                description=desc,
-                                source_type="excel_upload",
-                                source_id=sid,
-                                is_active=is_active
-                            )
-                            store.status = status
-                            store.update_from_raw_sheets(raw_dict, period=period)
-                            logger.info(f"Successfully restored persistent Excel source '{store.name}' ({sid}).")
-                        except Exception as ex:
-                            logger.warning(f"Could not restore source {sid}: {ex}")
+                        if os.path.exists(clean_path):
+                            try:
+                                extracted = reader.extract_from_excel(clean_path)
+                                raw_dict = {sname: sdata.get('values', []) for sname, sdata in extracted.get('sheets', {}).items()}
+                                store.update_from_raw_sheets(raw_dict, period=period)
+                            except Exception as ex:
+                                logger.warning(f"Could not re-parse excel {sid}: {ex}")
 
             except Exception as e:
                 logger.warning(f"Failed loading sources registry: {e}")
@@ -175,7 +173,6 @@ class SyncManager:
 
             self.sources[sid] = store
             self._dirty_combined = True
-            self._save_registry()
             return store
 
     def get_combined_store(self) -> InventoryDataStore:
@@ -200,7 +197,6 @@ class SyncManager:
                 if store.status == "archived":
                     continue
 
-                # Direct extension avoids duplicating tens of thousands of dict objects in RAM
                 all_prods.extend(store.products)
                 all_movs.extend(store.movements)
                 all_worksheets.extend(store.worksheets)
@@ -223,7 +219,7 @@ class SyncManager:
             self._dirty_combined = False
             return combined
 
-    def get_store(self, source_filter: str = "active") -> Optional[InventoryDataStore]:
+    def get_store(self, source_filter: str = "all") -> Optional[InventoryDataStore]:
         with self._lock:
             if not self.sources:
                 if source_filter in ("all", "combined"):
@@ -315,12 +311,12 @@ class SyncManager:
                 logger.error(f"Error in background sync poll loop: {e}", exc_info=True)
             time.sleep(self.sync_interval)
 
-    def sync_source(self, source_id: str = "active", force: bool = False) -> bool:
+    def sync_source(self, source_id: str = "all", force: bool = False) -> bool:
         if source_id in ("all", "combined"):
             with self._lock:
-                g_sids = [sid for sid, s in self.sources.items() if s.source_type == "google_sheets" and s.status != "archived"]
+                all_sids = list(self.sources.keys())
             success = True
-            for sid in g_sids:
+            for sid in all_sids:
                 if not self.sync_source(sid, force=force):
                     success = False
             return success
@@ -330,6 +326,24 @@ class SyncManager:
             return False
 
         if store.source_type == "excel_upload":
+            clean_path = store.spreadsheet_id
+            if clean_path.startswith("local_file:"):
+                clean_path = clean_path.split("local_file:", 1)[1]
+            if os.path.exists(clean_path):
+                try:
+                    reader = UniversalSpreadsheetReader()
+                    extracted = reader.extract_from_excel(clean_path)
+                    raw_dict = {sname: sdata.get('values', []) for sname, sdata in extracted.get('sheets', {}).items()}
+                    store.update_from_raw_sheets(raw_dict, period=store.period)
+                    store.last_sync_status = "success"
+                    store.last_sync_error = None
+                    self._save_registry()
+                except Exception as ex:
+                    logger.warning(f"Excel sync notice for {store.source_id}: {ex}")
+            else:
+                store.last_sync_status = "success"
+                store.last_sync_error = None
+            self._record_run(store, "success", None)
             return True
 
         with self._lock:
@@ -377,6 +391,7 @@ class SyncManager:
 
             store.update_from_raw_sheets(raw_dict)
             self._record_run(store, "success", None)
+            self._save_registry()
             return True
         except Exception as e:
             logger.error(f"Sync failed for {store.source_id}: {e}", exc_info=True)
@@ -428,7 +443,7 @@ class SyncManager:
                     "nextSync": f"Every {self.sync_interval}s"
                 }
 
-            active_store = self.get_store("active")
+            active_store = self.get_store("all")
             is_live = any(s.source_type == "google_sheets" and s.last_sync_status == "success" for s in self.sources.values())
             has_error = any(s.last_sync_status == "error" for s in self.sources.values())
             state = "paused" if self._is_paused else ("syncing" if self._is_syncing else ("connected" if is_live else ("error" if has_error else "demo")))

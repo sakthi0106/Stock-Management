@@ -12,25 +12,33 @@ from config import Config
 logger = logging.getLogger(__name__)
 
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
-_SERVICE_LOCK = threading.Lock()
-_CACHED_SERVICE = None
-_CACHED_CREDS_KEY = None
-_CACHED_HTTP = None
+
+# Thread-local storage ensures each thread has its own isolated httplib2.Http instance and Google Sheets service
+# This completely eliminates [SSL: WRONG_VERSION_NUMBER] socket collision errors in multi-threaded environments
+_THREAD_LOCAL = threading.local()
+_DISCOVERY_LOCK = threading.Lock()
+_CACHED_DISCOVERY_DOC = None
 
 
 def to_a1_range(sheet_name: str) -> str:
     """Formats sheet name for Google Sheets A1 notation range syntax."""
     s = str(sheet_name).strip()
-    # Simple alphanumeric + underscore sheet names do not require quoting
     if re.match(r'^[a-zA-Z0-9_]+$', s):
         return s
-    # Names with spaces or special characters must be wrapped in single quotes, with interior quotes doubled
     escaped = s.replace("'", "''")
     return f"'{escaped}'"
 
 
+def reset_thread_service():
+    """Resets the thread-local HTTP and service instances after a connection error."""
+    if hasattr(_THREAD_LOCAL, 'service'):
+        _THREAD_LOCAL.service = None
+    if hasattr(_THREAD_LOCAL, 'http'):
+        _THREAD_LOCAL.http = None
+
+
 class GoogleSheetsClient:
-    """Fast, persistent Google Sheets API client with connection pooling and batch values fetching."""
+    """Thread-safe, high-performance Google Sheets API client with per-thread socket isolation."""
     def __init__(self, spreadsheet_id: Optional[str] = None, service_account_json: Optional[str] = None):
         self.spreadsheet_id = (spreadsheet_id or Config.GOOGLE_SHEETS_SPREADSHEET_ID or "").strip()
         self.service_account_json = (service_account_json or Config.GOOGLE_SERVICE_ACCOUNT_JSON or "").strip()
@@ -52,47 +60,59 @@ class GoogleSheetsClient:
         )
 
     def _init_service(self):
-        global _CACHED_SERVICE, _CACHED_CREDS_KEY, _CACHED_HTTP
+        global _CACHED_DISCOVERY_DOC
         if not self.spreadsheet_id:
             self._last_error = "No Google Sheets Spreadsheet ID configured."
             return
 
-        creds_key = self.service_account_json[:64] if self.service_account_json else ""
-        with _SERVICE_LOCK:
-            if _CACHED_SERVICE is not None and _CACHED_CREDS_KEY == creds_key:
-                self._service = _CACHED_SERVICE
+        try:
+            creds = self._load_credentials()
+            if not creds:
+                self._last_error = "Google service account credentials missing or invalid."
+                return
+
+            # Check thread-local cache first
+            svc = getattr(_THREAD_LOCAL, 'service', None)
+            if svc is not None:
+                self._service = svc
                 self._is_configured = True
                 self._last_error = None
                 return
 
-            try:
-                creds = self._load_credentials()
-                if not creds:
-                    self._last_error = "Google service account credentials missing or invalid."
-                    return
+            # Create an isolated HTTP transport for this thread
+            http = getattr(_THREAD_LOCAL, 'http', None)
+            if http is None:
+                http = httplib2.Http(timeout=25)
+                _THREAD_LOCAL.http = http
 
-                import googleapiclient.discovery_cache  # noqa: F401
-                from googleapiclient.discovery import build
+            authed_http = google_auth_httplib2.AuthorizedHttp(creds, http=http)
 
-                if _CACHED_HTTP is None:
-                    _CACHED_HTTP = httplib2.Http(timeout=20)
-                authed_http = google_auth_httplib2.AuthorizedHttp(creds, http=_CACHED_HTTP)
+            with _DISCOVERY_LOCK:
+                if _CACHED_DISCOVERY_DOC is None:
+                    import googleapiclient.discovery_cache  # noqa: F401
+                    from googleapiclient.discovery import build
+                    temp_svc = build(
+                        'sheets',
+                        'v4',
+                        http=authed_http,
+                        cache_discovery=False,
+                        static_discovery=False
+                    )
+                    _CACHED_DISCOVERY_DOC = temp_svc._rootDesc
+                    _THREAD_LOCAL.service = temp_svc
+                    self._service = temp_svc
+                else:
+                    from googleapiclient.discovery import build_from_document
+                    svc = build_from_document(_CACHED_DISCOVERY_DOC, http=authed_http)
+                    _THREAD_LOCAL.service = svc
+                    self._service = svc
 
-                svc = build(
-                    'sheets',
-                    'v4',
-                    http=authed_http,
-                    cache_discovery=False,
-                    static_discovery=False
-                )
-                _CACHED_SERVICE = svc
-                _CACHED_CREDS_KEY = creds_key
-                self._service = svc
-                self._is_configured = True
-                self._last_error = None
-            except Exception as e:
-                self._last_error = str(e)
-                logger.error(f"GoogleSheetsClient initialization failed: {e}")
+            self._is_configured = True
+            self._last_error = None
+        except Exception as e:
+            self._last_error = str(e)
+            reset_thread_service()
+            logger.error(f"GoogleSheetsClient initialization failed: {e}")
 
     def is_configured(self) -> bool:
         return self._is_configured and self._service is not None
@@ -111,6 +131,7 @@ class GoogleSheetsClient:
             ).execute()
             return res
         except Exception as e:
+            reset_thread_service()
             logger.error(f"Failed to fetch metadata for {self.spreadsheet_id}: {e}")
             self._last_error = str(e)
             return {"title": "Error", "sheets": [], "error": str(e)}
@@ -141,6 +162,11 @@ class GoogleSheetsClient:
                         result[name] = []
             except Exception as batch_err:
                 logger.warning(f"batchGet failed for {batch_names}, attempting single gets: {batch_err}")
+                reset_thread_service()
+                # Re-initialize service for thread fallback
+                self._init_service()
+                if not self._service:
+                    continue
                 for single_name in batch_names:
                     try:
                         clean_r = to_a1_range(single_name)

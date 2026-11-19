@@ -18,7 +18,7 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [inventoryStatusFilter, setInventoryStatusFilter] = useState<string | undefined>(undefined);
-  const [selectedSource, setSelectedSource] = useState<string>('active');
+  const [selectedSource, setSelectedSource] = useState<string>('all');
 
   const [syncStatus, setSyncStatus] = useState<SyncStatusType | null>(null);
   const [syncing, setSyncing] = useState(false);
