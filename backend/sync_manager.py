@@ -318,7 +318,7 @@ class SyncManager:
         if store.source_type == "excel_upload":
             return True
 
-        if self._is_syncing:
+        if self._is_syncing and not force:
             return False
 
         self._is_syncing = True
@@ -390,46 +390,60 @@ class SyncManager:
             self.sync_history = self.sync_history[:50]
 
     def get_status(self) -> Dict[str, Any]:
-        store = self.get_store("active")
-        if not store:
+        with self._lock:
+            if not self.sources:
+                return {
+                    "state": "paused" if self._is_paused else "disconnected",
+                    "is_live_google_sheet": False,
+                    "is_paused": self._is_paused,
+                    "poll_interval_seconds": self.sync_interval,
+                    "lastSuccess": None,
+                    "lastError": "No spreadsheet source connected. Add a Google Sheet ID or upload Excel.",
+                    "source": "No Active Source",
+                    "itemsSynced": 0,
+                    "sheetsProcessed": 0,
+                    "sheets": [],
+                    "nextSync": f"Every {self.sync_interval}s"
+                }
+
+            active_store = self.get_store("active")
+            is_live = any(s.source_type == "google_sheets" and s.last_sync_status == "success" for s in self.sources.values())
+            has_error = any(s.last_sync_status == "error" for s in self.sources.values())
+            state = "paused" if self._is_paused else ("syncing" if self._is_syncing else ("connected" if is_live else ("error" if has_error else "demo")))
+
+            all_sheets_status = []
+            total_items = 0
+            latest_success = None
+            last_err = None
+
+            for s in self.sources.values():
+                total_items += len(s.products)
+                if s.last_sync_at and (not latest_success or s.last_sync_at > latest_success):
+                    latest_success = s.last_sync_at
+                if s.last_sync_error:
+                    last_err = s.last_sync_error
+                for w in s.worksheets:
+                    sheet_label = f"{s.name} - {w['sheet_name']}" if len(self.sources) > 1 else w["sheet_name"]
+                    all_sheets_status.append({
+                        "name": sheet_label,
+                        "status": "success",
+                        "row_count": w["row_count"],
+                        "last_sync": s.last_sync_at,
+                        "issues": w.get("issues", [])
+                    })
+
+            source_name = "All Connected Sheets" if len(self.sources) > 1 else (active_store.name if active_store else "Google Sheets")
+
             return {
-                "state": "paused" if self._is_paused else "disconnected",
-                "is_live_google_sheet": False,
+                "state": state,
+                "is_live_google_sheet": is_live,
                 "is_paused": self._is_paused,
                 "poll_interval_seconds": self.sync_interval,
-                "lastSuccess": None,
-                "lastError": "No spreadsheet source connected. Add a Google Sheet ID or upload Excel.",
-                "source": "No Active Source",
-                "itemsSynced": 0,
-                "sheetsProcessed": 0,
-                "sheets": [],
+                "lastSuccess": latest_success,
+                "lastError": last_err,
+                "source": source_name,
+                "itemsSynced": total_items,
+                "sheetsProcessed": len(all_sheets_status),
+                "sheets": all_sheets_status,
                 "nextSync": f"Every {self.sync_interval}s"
             }
-
-        is_live = store.source_type == "google_sheets" and store.last_sync_status == "success"
-        state = "paused" if self._is_paused else ("syncing" if self._is_syncing else ("connected" if is_live else ("error" if store.last_sync_status == "error" else "demo")))
-
-        sheets_status = [
-            {
-                "name": w["sheet_name"],
-                "status": "success",
-                "row_count": w["row_count"],
-                "last_sync": store.last_sync_at,
-                "issues": w.get("issues", [])
-            }
-            for w in store.worksheets
-        ]
-
-        return {
-            "state": state,
-            "is_live_google_sheet": is_live,
-            "is_paused": self._is_paused,
-            "poll_interval_seconds": self.sync_interval,
-            "lastSuccess": store.last_sync_at,
-            "lastError": store.last_sync_error,
-            "source": store.name,
-            "itemsSynced": len(store.products),
-            "sheetsProcessed": len(store.worksheets),
-            "sheets": sheets_status,
-            "nextSync": f"Every {self.sync_interval}s"
-        }

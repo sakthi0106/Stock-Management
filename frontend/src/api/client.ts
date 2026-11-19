@@ -266,7 +266,7 @@ class ApiClient {
     return this.request<SyncStatus>('/sync/status');
   }
 
-  async triggerSync(source = 'active'): Promise<{ success: boolean; status: SyncStatus }> {
+  async triggerSync(source = 'all'): Promise<{ success: boolean; status: SyncStatus }> {
     return this.request(`/sync/refresh?source=${encodeURIComponent(source)}`, { method: 'POST' });
   }
 

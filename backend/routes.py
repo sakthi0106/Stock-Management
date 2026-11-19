@@ -202,8 +202,9 @@ def archive_source(source_id: str):
 
 @api_bp.route('/sources/<source_id>/sync', methods=['POST'])
 def sync_single_source(source_id: str):
-    threading.Thread(target=_sync_manager.sync_source, args=(source_id, True), daemon=True).start()
-    return jsonify({"success": True, "status": _sync_manager.get_status(), "message": "Sync started"})
+    # Synchronously sync the requested source
+    success = _sync_manager.sync_source(source_id, force=True)
+    return jsonify({"success": success, "status": _sync_manager.get_status(), "message": "Sync completed successfully" if success else "Sync finished with notices"})
 
 
 @api_bp.route('/sources/<source_id>/sheets', methods=['GET'])
@@ -394,7 +395,7 @@ def sync_status():
 
 @api_bp.route('/sync/refresh', methods=['POST'])
 def sync_refresh():
-    source = request.args.get('source', 'active').strip()
+    source = request.args.get('source', 'all').strip() or 'all'
     # Synchronously sync source(s) and return immediately updated status
     success = _sync_manager.sync_source(source, force=True)
     return jsonify({"success": success, "status": _sync_manager.get_status(), "message": "Sync completed successfully" if success else "Sync finished with notices"})

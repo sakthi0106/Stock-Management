@@ -83,7 +83,7 @@ export function useInventory(
   const triggerManualSync = async () => {
     setSyncing(true);
     try {
-      const res = await apiClient.triggerSync(source);
+      const res = await apiClient.triggerSync('all');
       setSyncStatus(res.status);
       await fetchInventory(false);
     } catch (err: any) {

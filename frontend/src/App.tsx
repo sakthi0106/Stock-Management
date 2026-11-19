@@ -43,7 +43,7 @@ export function App() {
   const handleManualSync = async () => {
     setSyncing(true);
     try {
-      const res = await apiClient.triggerSync(selectedSource);
+      const res = await apiClient.triggerSync('all');
       setSyncStatus(res.status);
       setManualRefreshKey((prev) => prev + 1);
     } catch (e) {

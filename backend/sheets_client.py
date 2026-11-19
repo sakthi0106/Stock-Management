@@ -97,15 +97,16 @@ class GoogleSheetsClient:
             return {"title": "Error", "sheets": [], "error": str(e)}
 
     def get_batch_sheet_values(self, sheet_names: List[str]) -> Dict[str, List[List[Any]]]:
-        """Fetches raw 2D values for listed sheets in an efficient single batch call."""
+        """Fetches raw 2D values for listed sheets in an efficient batch call with individual fallback."""
         if not self.is_configured() or not sheet_names:
             return {}
 
         result = {}
-        try:
-            for idx in range(0, len(sheet_names), 10):
-                batch_names = sheet_names[idx:idx + 10]
-                ranges = [f"'{name}'" for name in batch_names]
+        for idx in range(0, len(sheet_names), 10):
+            batch_names = sheet_names[idx:idx + 10]
+            # In Google Sheets A1 notation, single quotes in sheet titles must be doubled
+            ranges = [f"'{name.replace(chr(39), chr(39)+chr(39))}'" for name in batch_names]
+            try:
                 res = self._service.spreadsheets().values().batchGet(
                     spreadsheetId=self.spreadsheet_id,
                     ranges=ranges,
@@ -113,12 +114,26 @@ class GoogleSheetsClient:
                     dateTimeRenderOption='FORMATTED_STRING'
                 ).execute()
 
-                for i, vr in enumerate(res.get('valueRanges', [])):
-                    rng = vr.get('range', '')
-                    sheet_title = rng.split('!')[0].strip("'") if '!' in rng else batch_names[i]
-                    result[sheet_title] = vr.get('values', [])
-            return result
-        except Exception as e:
-            logger.error(f"Error fetching batch values: {e}")
-            self._last_error = str(e)
-            return {}
+                val_ranges = res.get('valueRanges', [])
+                for i, name in enumerate(batch_names):
+                    if i < len(val_ranges):
+                        result[name] = val_ranges[i].get('values', [])
+                    else:
+                        result[name] = []
+            except Exception as batch_err:
+                logger.warning(f"batchGet failed for {batch_names}, falling back to single sheet gets: {batch_err}")
+                for single_name in batch_names:
+                    try:
+                        clean_r = f"'{single_name.replace(chr(39), chr(39)+chr(39))}'"
+                        s_res = self._service.spreadsheets().values().get(
+                            spreadsheetId=self.spreadsheet_id,
+                            range=clean_r,
+                            valueRenderOption='UNFORMATTED_VALUE',
+                            dateTimeRenderOption='FORMATTED_STRING'
+                        ).execute()
+                        result[single_name] = s_res.get('values', [])
+                    except Exception as single_err:
+                        logger.error(f"Failed to fetch worksheet '{single_name}': {single_err}")
+                        result[single_name] = []
+
+        return result
