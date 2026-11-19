@@ -5,7 +5,7 @@ import time
 import logging
 import threading
 import datetime
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Set
 from sheets_client import GoogleSheetsClient
 from inventory_store import InventoryDataStore, extract_spreadsheet_id
 from spreadsheet_reader import UniversalSpreadsheetReader
@@ -27,6 +27,7 @@ class SyncManager:
         self._stop_event = threading.Event()
         self._is_paused = False
         self._is_syncing = False
+        self._active_syncing_sids: Set[str] = set()
         self.sync_history: List[Dict[str, Any]] = []
 
         # Caching for combined multi-source views to prevent redundant object churn
@@ -65,73 +66,82 @@ class SyncManager:
     def _load_registry(self):
         """Restores sources and reparses them on startup if files exist on disk."""
         reg_path = self._get_registry_path()
-        if not os.path.exists(reg_path):
-            return
+        if os.path.exists(reg_path):
+            try:
+                with open(reg_path, 'r', encoding='utf-8') as f:
+                    records = json.load(f)
 
-        try:
-            with open(reg_path, 'r', encoding='utf-8') as f:
-                records = json.load(f)
+                reader = UniversalSpreadsheetReader()
+                for r in records:
+                    sid = r.get("source_id")
+                    stype = r.get("source_type", "google_sheets")
+                    name = r.get("name", "Restored Source")
+                    period = r.get("period", "")
+                    desc = r.get("description", "")
+                    is_active = bool(r.get("is_active", False))
+                    status = r.get("status", "active")
 
-            reader = UniversalSpreadsheetReader()
-            for r in records:
-                sid = r.get("source_id")
-                stype = r.get("source_type", "google_sheets")
-                name = r.get("name", "Restored Source")
-                period = r.get("period", "")
-                desc = r.get("description", "")
-                is_active = bool(r.get("is_active", False))
-                status = r.get("status", "active")
+                    if stype == "google_sheets":
+                        sheet_id = r.get("spreadsheet_id", "")
+                        if sheet_id:
+                            store = self.register_source(
+                                name=name,
+                                spreadsheet_url_or_id=sheet_id,
+                                period=period,
+                                description=desc,
+                                source_type="google_sheets",
+                                source_id=sid,
+                                is_active=is_active
+                            )
+                            store.status = status
+                            logger.info(f"Restored Google Sheets source '{name}' ({sid}).")
 
-                if stype == "google_sheets":
-                    sheet_id = r.get("spreadsheet_id", "")
-                    if sheet_id:
-                        store = self.register_source(
-                            name=name,
-                            spreadsheet_url_or_id=sheet_id,
-                            period=period,
-                            description=desc,
-                            source_type="google_sheets",
-                            source_id=sid,
-                            is_active=is_active
-                        )
-                        store.status = status
-                        threading.Thread(target=self.sync_source, args=(sid, True), daemon=True).start()
-                        logger.info(f"Restored Google Sheets source '{name}' ({sid}).")
+                    elif stype == "excel_upload":
+                        clean_path = r.get("spreadsheet_id", "")
+                        if clean_path.startswith("local_file:"):
+                            clean_path = clean_path.split("local_file:", 1)[1]
 
-                elif stype == "excel_upload":
-                    clean_path = r.get("spreadsheet_id", "")
-                    if clean_path.startswith("local_file:"):
-                        clean_path = clean_path.split("local_file:", 1)[1]
+                        if not os.path.exists(clean_path):
+                            basename = os.path.basename(clean_path)
+                            candidate = os.path.join(Config.UPLOAD_FOLDER, basename)
+                            if os.path.exists(candidate):
+                                clean_path = candidate
+                            else:
+                                continue
 
-                    if not os.path.exists(clean_path):
-                        basename = os.path.basename(clean_path)
-                        candidate = os.path.join(Config.UPLOAD_FOLDER, basename)
-                        if os.path.exists(candidate):
-                            clean_path = candidate
-                        else:
-                            continue
+                        try:
+                            extracted = reader.extract_from_excel(clean_path)
+                            raw_dict = {sname: sdata.get('values', []) for sname, sdata in extracted.get('sheets', {}).items()}
 
-                    try:
-                        extracted = reader.extract_from_excel(clean_path)
-                        raw_dict = {sname: sdata.get('values', []) for sname, sdata in extracted.get('sheets', {}).items()}
+                            store = self.register_source(
+                                name=name,
+                                spreadsheet_url_or_id=f"local_file:{clean_path}",
+                                period=period,
+                                description=desc,
+                                source_type="excel_upload",
+                                source_id=sid,
+                                is_active=is_active
+                            )
+                            store.status = status
+                            store.update_from_raw_sheets(raw_dict, period=period)
+                            logger.info(f"Successfully restored persistent Excel source '{store.name}' ({sid}).")
+                        except Exception as ex:
+                            logger.warning(f"Could not restore source {sid}: {ex}")
 
-                        store = self.register_source(
-                            name=name,
-                            spreadsheet_url_or_id=f"local_file:{clean_path}",
-                            period=period,
-                            description=desc,
-                            source_type="excel_upload",
-                            source_id=sid,
-                            is_active=is_active
-                        )
-                        store.status = status
-                        store.update_from_raw_sheets(raw_dict, period=period)
-                        logger.info(f"Successfully restored persistent Excel source '{store.name}' ({sid}).")
-                    except Exception as ex:
-                        logger.warning(f"Could not restore source {sid}: {ex}")
+            except Exception as e:
+                logger.warning(f"Failed loading sources registry: {e}")
 
-        except Exception as e:
-            logger.warning(f"Failed loading sources registry: {e}")
+        # Auto-register environment variable source if configured and no source with that ID exists
+        if Config.GOOGLE_SHEETS_SPREADSHEET_ID:
+            clean_env_id = extract_spreadsheet_id(Config.GOOGLE_SHEETS_SPREADSHEET_ID)
+            if clean_env_id and not any(s.spreadsheet_id == clean_env_id for s in self.sources.values()):
+                self.register_source(
+                    name="Google Sheet Live",
+                    spreadsheet_url_or_id=clean_env_id,
+                    source_type="google_sheets",
+                    is_active=True
+                )
+                logger.info(f"Auto-registered default Google Sheets source from environment: {clean_env_id}")
 
     def register_source(
         self,
@@ -268,12 +278,13 @@ class SyncManager:
             return True
 
     def start_poller(self):
-        if self._poller_thread and self._poller_thread.is_alive():
-            return
-        self._stop_event.clear()
-        self._poller_thread = threading.Thread(target=self._poll_loop, daemon=True, name="GoogleSheetsSyncThread")
-        self._poller_thread.start()
-        logger.info("Started 15-second Google Sheets background synchronization worker.")
+        with self._lock:
+            if self._poller_thread and self._poller_thread.is_alive():
+                return
+            self._stop_event.clear()
+            self._poller_thread = threading.Thread(target=self._poll_loop, daemon=True, name="GoogleSheetsSyncThread")
+            self._poller_thread.start()
+            logger.info(f"Started Google Sheets background sync worker with {self.sync_interval}s interval.")
 
     def stop_poller(self):
         self._stop_event.set()
@@ -287,18 +298,21 @@ class SyncManager:
         self._is_paused = False
 
     def _poll_loop(self):
-        time.sleep(2)
+        time.sleep(1)
         while not self._stop_event.is_set():
-            if not self._is_paused:
-                with self._lock:
-                    g_sids = [
-                        sid for sid, s in self.sources.items()
-                        if s.source_type == "google_sheets" and s.status != "archived"
-                    ]
-                for sid in g_sids:
-                    if self._stop_event.is_set() or self._is_paused:
-                        break
-                    self.sync_source(sid)
+            try:
+                if not self._is_paused:
+                    with self._lock:
+                        g_sids = [
+                            sid for sid, s in self.sources.items()
+                            if s.source_type == "google_sheets" and s.status != "archived"
+                        ]
+                    for sid in g_sids:
+                        if self._stop_event.is_set() or self._is_paused:
+                            break
+                        self.sync_source(sid)
+            except Exception as e:
+                logger.error(f"Error in background sync poll loop: {e}", exc_info=True)
             time.sleep(self.sync_interval)
 
     def sync_source(self, source_id: str = "active", force: bool = False) -> bool:
@@ -318,10 +332,12 @@ class SyncManager:
         if store.source_type == "excel_upload":
             return True
 
-        if self._is_syncing and not force:
-            return False
+        with self._lock:
+            if store.source_id in self._active_syncing_sids and not force:
+                return False
+            self._active_syncing_sids.add(store.source_id)
+            self._is_syncing = True
 
-        self._is_syncing = True
         try:
             client = GoogleSheetsClient(spreadsheet_id=store.spreadsheet_id)
             if not client.is_configured():
@@ -356,7 +372,7 @@ class SyncManager:
                 return False
 
             sheet_title = meta.get("properties", {}).get("title")
-            if sheet_title and store.name in ("Google Sheet", "Untitled Source", ""):
+            if sheet_title and store.name in ("Google Sheet", "Untitled Source", "Google Sheet Live", ""):
                 store.name = sheet_title
 
             store.update_from_raw_sheets(raw_dict)
@@ -369,8 +385,10 @@ class SyncManager:
             self._record_run(store, "error", str(e))
             return False
         finally:
-            self._dirty_combined = True
-            self._is_syncing = False
+            with self._lock:
+                self._active_syncing_sids.discard(store.source_id)
+                self._is_syncing = bool(self._active_syncing_sids)
+                self._dirty_combined = True
             import gc
             gc.collect()
 
@@ -390,6 +408,10 @@ class SyncManager:
             self.sync_history = self.sync_history[:50]
 
     def get_status(self) -> Dict[str, Any]:
+        # Self-healing: if background poller thread stopped or was not started, revive it
+        if not self._poller_thread or not self._poller_thread.is_alive():
+            self.start_poller()
+
         with self._lock:
             if not self.sources:
                 return {

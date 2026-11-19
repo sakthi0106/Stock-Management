@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import threading
 import httplib2
 import google_auth_httplib2
@@ -11,12 +12,25 @@ from config import Config
 logger = logging.getLogger(__name__)
 
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets.readonly']
-_DISCOVERY_LOCK = threading.Lock()
-_CACHED_DISCOVERY_DOC = None
+_SERVICE_LOCK = threading.Lock()
+_CACHED_SERVICE = None
+_CACHED_CREDS_KEY = None
+_CACHED_HTTP = None
+
+
+def to_a1_range(sheet_name: str) -> str:
+    """Formats sheet name for Google Sheets A1 notation range syntax."""
+    s = str(sheet_name).strip()
+    # Simple alphanumeric + underscore sheet names do not require quoting
+    if re.match(r'^[a-zA-Z0-9_]+$', s):
+        return s
+    # Names with spaces or special characters must be wrapped in single quotes, with interior quotes doubled
+    escaped = s.replace("'", "''")
+    return f"'{escaped}'"
 
 
 class GoogleSheetsClient:
-    """Clean Google Sheets API client for reading worksheets and cellular ranges."""
+    """Fast, persistent Google Sheets API client with connection pooling and batch values fetching."""
     def __init__(self, spreadsheet_id: Optional[str] = None, service_account_json: Optional[str] = None):
         self.spreadsheet_id = (spreadsheet_id or Config.GOOGLE_SHEETS_SPREADSHEET_ID or "").strip()
         self.service_account_json = (service_account_json or Config.GOOGLE_SERVICE_ACCOUNT_JSON or "").strip()
@@ -38,42 +52,47 @@ class GoogleSheetsClient:
         )
 
     def _init_service(self):
-        global _CACHED_DISCOVERY_DOC
+        global _CACHED_SERVICE, _CACHED_CREDS_KEY, _CACHED_HTTP
         if not self.spreadsheet_id:
             self._last_error = "No Google Sheets Spreadsheet ID configured."
             return
 
-        try:
-            creds = self._load_credentials()
-            if not creds:
-                self._last_error = "Google service account credentials missing or invalid."
+        creds_key = self.service_account_json[:64] if self.service_account_json else ""
+        with _SERVICE_LOCK:
+            if _CACHED_SERVICE is not None and _CACHED_CREDS_KEY == creds_key:
+                self._service = _CACHED_SERVICE
+                self._is_configured = True
+                self._last_error = None
                 return
 
-            with _DISCOVERY_LOCK:
+            try:
+                creds = self._load_credentials()
+                if not creds:
+                    self._last_error = "Google service account credentials missing or invalid."
+                    return
+
                 import googleapiclient.discovery_cache  # noqa: F401
-                from googleapiclient.discovery import build, build_from_document
-                http = httplib2.Http(timeout=15)
-                authed_http = google_auth_httplib2.AuthorizedHttp(creds, http=http)
+                from googleapiclient.discovery import build
 
-                if _CACHED_DISCOVERY_DOC is None:
-                    svc = build(
-                        'sheets',
-                        'v4',
-                        http=authed_http,
-                        cache_discovery=False,
-                        static_discovery=False
-                    )
-                    # Cache the discovery schema in memory so subsequent syncs never re-download it
-                    _CACHED_DISCOVERY_DOC = svc._rootDesc
-                    self._service = svc
-                else:
-                    self._service = build_from_document(_CACHED_DISCOVERY_DOC, http=authed_http)
+                if _CACHED_HTTP is None:
+                    _CACHED_HTTP = httplib2.Http(timeout=20)
+                authed_http = google_auth_httplib2.AuthorizedHttp(creds, http=_CACHED_HTTP)
 
-            self._is_configured = True
-            self._last_error = None
-        except Exception as e:
-            self._last_error = str(e)
-            logger.error(f"GoogleSheetsClient initialization failed: {e}")
+                svc = build(
+                    'sheets',
+                    'v4',
+                    http=authed_http,
+                    cache_discovery=False,
+                    static_discovery=False
+                )
+                _CACHED_SERVICE = svc
+                _CACHED_CREDS_KEY = creds_key
+                self._service = svc
+                self._is_configured = True
+                self._last_error = None
+            except Exception as e:
+                self._last_error = str(e)
+                logger.error(f"GoogleSheetsClient initialization failed: {e}")
 
     def is_configured(self) -> bool:
         return self._is_configured and self._service is not None
@@ -97,15 +116,15 @@ class GoogleSheetsClient:
             return {"title": "Error", "sheets": [], "error": str(e)}
 
     def get_batch_sheet_values(self, sheet_names: List[str]) -> Dict[str, List[List[Any]]]:
-        """Fetches raw 2D values for listed sheets in an efficient batch call with individual fallback."""
+        """Fetches raw 2D values for all listed sheets in a single fast batch call with per-sheet fallback."""
         if not self.is_configured() or not sheet_names:
             return {}
 
         result = {}
-        for idx in range(0, len(sheet_names), 10):
-            batch_names = sheet_names[idx:idx + 10]
-            # In Google Sheets A1 notation, single quotes in sheet titles must be doubled
-            ranges = [f"'{name.replace(chr(39), chr(39)+chr(39))}'" for name in batch_names]
+        # Fetch up to 60 sheets in a single batchGet network round trip
+        for idx in range(0, len(sheet_names), 60):
+            batch_names = sheet_names[idx:idx + 60]
+            ranges = [to_a1_range(name) for name in batch_names]
             try:
                 res = self._service.spreadsheets().values().batchGet(
                     spreadsheetId=self.spreadsheet_id,
@@ -117,21 +136,21 @@ class GoogleSheetsClient:
                 val_ranges = res.get('valueRanges', [])
                 for i, name in enumerate(batch_names):
                     if i < len(val_ranges):
-                        result[name] = val_ranges[i].get('values', [])
+                        result[name] = val_ranges[i].get('values') or []
                     else:
                         result[name] = []
             except Exception as batch_err:
-                logger.warning(f"batchGet failed for {batch_names}, falling back to single sheet gets: {batch_err}")
+                logger.warning(f"batchGet failed for {batch_names}, attempting single gets: {batch_err}")
                 for single_name in batch_names:
                     try:
-                        clean_r = f"'{single_name.replace(chr(39), chr(39)+chr(39))}'"
+                        clean_r = to_a1_range(single_name)
                         s_res = self._service.spreadsheets().values().get(
                             spreadsheetId=self.spreadsheet_id,
                             range=clean_r,
                             valueRenderOption='UNFORMATTED_VALUE',
                             dateTimeRenderOption='FORMATTED_STRING'
                         ).execute()
-                        result[single_name] = s_res.get('values', [])
+                        result[single_name] = s_res.get('values') or []
                     except Exception as single_err:
                         logger.error(f"Failed to fetch worksheet '{single_name}': {single_err}")
                         result[single_name] = []

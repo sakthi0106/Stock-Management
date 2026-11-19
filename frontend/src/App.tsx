@@ -36,7 +36,7 @@ export function App() {
   useEffect(() => {
     fetchSync();
     // 10-second polling interval for live sync status updates so changes in Google Sheets reflect automatically
-    const interval = setInterval(fetchSync, 10000);
+    const interval = setInterval(fetchSync, 5000);
     return () => clearInterval(interval);
   }, []);
 
