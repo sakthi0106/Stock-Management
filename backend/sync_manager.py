@@ -34,15 +34,39 @@ class SyncManager:
         self._cached_combined: Optional[InventoryDataStore] = None
         self._dirty_combined: bool = True
 
-        # Restore all previously registered sources (Google Sheets & Excel) permanently from disk
+        # Restore all previously registered sources permanently from disk
         self._load_registry()
 
     def _get_registry_path(self) -> str:
         os.makedirs(Config.UPLOAD_FOLDER, exist_ok=True)
         return os.path.join(Config.UPLOAD_FOLDER, "sources_registry.json")
 
+    def _get_cache_path(self, source_id: str) -> str:
+        os.makedirs(Config.UPLOAD_FOLDER, exist_ok=True)
+        return os.path.join(Config.UPLOAD_FOLDER, f"cache_{source_id}.json")
+
+    def _save_source_cache(self, store: InventoryDataStore):
+        """Saves a single source's parsed inventory and worksheet data to an isolated JSON cache.
+        Using per-source files prevents large RAM allocations during serialization and protects Render's 512MB RAM ceiling.
+        """
+        try:
+            cache_path = self._get_cache_path(store.source_id)
+            payload = {
+                "products": store.products,
+                "movements": store.movements[:500],
+                "worksheets": store.worksheets,
+                "dynamic_columns": store.dynamic_columns,
+                "last_sync_at": store.last_sync_at,
+                "last_sync_status": store.last_sync_status,
+                "last_sync_error": store.last_sync_error
+            }
+            with open(cache_path, 'w', encoding='utf-8') as f:
+                json.dump(payload, f)
+        except Exception as e:
+            logger.warning(f"Could not save cache for source {store.source_id}: {e}")
+
     def _save_registry(self):
-        """Persists source metadata and complete parsed product/sheet data to disk so restarts preserve data permanently."""
+        """Persists source metadata to disk. Lightweight, fast, and does not duplicate inventory objects in RAM."""
         try:
             reg_path = self._get_registry_path()
             serializable = []
@@ -60,19 +84,16 @@ class SyncManager:
                         "last_sync_at": store.last_sync_at,
                         "last_sync_status": store.last_sync_status,
                         "last_sync_error": store.last_sync_error,
-                        "products": store.products,
-                        "movements": store.movements[:1000],
-                        "worksheets": store.worksheets,
-                        "dynamic_columns": store.dynamic_columns,
-                        "dynamic_records": {s: recs[:200] for s, recs in store.dynamic_records.items()}
+                        "items_count": len(store.products),
+                        "sheets_count": len(store.worksheets)
                     })
             with open(reg_path, 'w', encoding='utf-8') as f:
-                json.dump(serializable, f)
+                json.dump(serializable, f, indent=2)
         except Exception as e:
             logger.warning(f"Could not persist sources registry: {e}")
 
     def _load_registry(self):
-        """Restores sources and full parsed product/sheet records on startup permanently."""
+        """Restores sources and full parsed product/sheet records on startup permanently from cache."""
         reg_path = self._get_registry_path()
         if os.path.exists(reg_path):
             try:
@@ -103,17 +124,35 @@ class SyncManager:
                     store.last_sync_status = r.get("last_sync_status", "success")
                     store.last_sync_error = r.get("last_sync_error")
 
-                    # Permanently restore cached parsed products and worksheets
-                    cached_prods = r.get("products")
-                    if cached_prods:
-                        store.products = cached_prods
+                    # Permanently restore from isolated per-source cache file
+                    cache_path = self._get_cache_path(sid)
+                    loaded_from_cache = False
+                    if os.path.exists(cache_path):
+                        try:
+                            with open(cache_path, 'r', encoding='utf-8') as cf:
+                                cdata = json.load(cf)
+                            store.products = cdata.get("products", [])
+                            store.movements = cdata.get("movements", [])
+                            store.worksheets = cdata.get("worksheets", [])
+                            store.dynamic_columns = cdata.get("dynamic_columns", {})
+                            loaded_from_cache = bool(store.products or store.worksheets)
+                            if loaded_from_cache:
+                                logger.info(f"Permanently restored {len(store.products)} products for '{name}' ({sid}) from cache.")
+                        except Exception as ce:
+                            logger.warning(f"Could not load cache for {sid}: {ce}")
+
+                    # Backwards compatibility: check if legacy registry had embedded products
+                    if not loaded_from_cache and r.get("products"):
+                        store.products = r.get("products", [])
                         store.movements = r.get("movements", [])
                         store.worksheets = r.get("worksheets", [])
                         store.dynamic_columns = r.get("dynamic_columns", {})
                         store.dynamic_records = r.get("dynamic_records", {})
-                        logger.info(f"Permanently restored {len(cached_prods)} items and {len(store.worksheets)} worksheets for '{name}' ({sid}).")
+                        self._save_source_cache(store)
+                        loaded_from_cache = True
 
-                    if stype == "excel_upload" and not cached_prods:
+                    # If excel upload and no cache was found, try reading original excel file if it exists
+                    if stype == "excel_upload" and not loaded_from_cache:
                         clean_path = r.get("spreadsheet_id", "")
                         if clean_path.startswith("local_file:"):
                             clean_path = clean_path.split("local_file:", 1)[1]
@@ -123,6 +162,7 @@ class SyncManager:
                                 extracted = reader.extract_from_excel(clean_path)
                                 raw_dict = {sname: sdata.get('values', []) for sname, sdata in extracted.get('sheets', {}).items()}
                                 store.update_from_raw_sheets(raw_dict, period=period)
+                                self._save_source_cache(store)
                             except Exception as ex:
                                 logger.warning(f"Could not re-parse excel {sid}: {ex}")
 
@@ -264,6 +304,14 @@ class SyncManager:
                     except Exception:
                         pass
 
+            # Clean up persistent cache file
+            cache_path = self._get_cache_path(source_id)
+            if os.path.exists(cache_path):
+                try:
+                    os.remove(cache_path)
+                except Exception:
+                    pass
+
             if self.active_source_id == source_id:
                 self.active_source_id = next(iter(self.sources)) if self.sources else None
                 if self.active_source_id:
@@ -337,6 +385,7 @@ class SyncManager:
                     store.update_from_raw_sheets(raw_dict, period=store.period)
                     store.last_sync_status = "success"
                     store.last_sync_error = None
+                    self._save_source_cache(store)
                     self._save_registry()
                 except Exception as ex:
                     logger.warning(f"Excel sync notice for {store.source_id}: {ex}")
@@ -391,6 +440,7 @@ class SyncManager:
 
             store.update_from_raw_sheets(raw_dict)
             self._record_run(store, "success", None)
+            self._save_source_cache(store)
             self._save_registry()
             return True
         except Exception as e:

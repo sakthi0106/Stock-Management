@@ -41,6 +41,7 @@ const AddSourceModal: React.FC<AddModalProps> = ({ onClose, onAdded }) => {
   const [uploadPeriod, setUploadPeriod] = useState('');
   const [uploadDescription, setUploadDescription] = useState('');
   const [uploadIsActive, setUploadIsActive] = useState(true);
+  const [uploadProgress, setUploadProgress] = useState('');
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -83,24 +84,33 @@ const AddSourceModal: React.FC<AddModalProps> = ({ onClose, onAdded }) => {
     setSaving(true);
     setError('');
     try {
-      const fd = new FormData();
-      uploadFiles.forEach(file => {
-        fd.append('files', file);
-      });
-      if (uploadFiles.length === 1) {
-        fd.append('name', uploadName || uploadFiles[0].name.replace(/\.[^/.]+$/, ''));
-      }
-      fd.append('period', uploadPeriod);
-      fd.append('description', uploadDescription);
-      fd.append('is_active', uploadIsActive ? 'true' : 'false');
+      for (let i = 0; i < uploadFiles.length; i++) {
+        const file = uploadFiles[i];
+        if (uploadFiles.length > 1) {
+          setUploadProgress(`Processing ${i + 1}/${uploadFiles.length}: ${file.name}`);
+        } else {
+          setUploadProgress(`Processing ${file.name}...`);
+        }
+        const fd = new FormData();
+        fd.append('file', file);
+        if (uploadFiles.length === 1 && uploadName) {
+          fd.append('name', uploadName);
+        } else {
+          fd.append('name', file.name.replace(/\.[^/.]+$/, ''));
+        }
+        fd.append('period', uploadPeriod);
+        fd.append('description', uploadDescription);
+        fd.append('is_active', uploadIsActive ? 'true' : 'false');
 
-      await apiClient.uploadSource(fd);
+        await apiClient.uploadSource(fd);
+      }
       onAdded();
       onClose();
     } catch (err: any) {
       setError(err.message || 'Failed to upload Excel workbook(s).');
     } finally {
       setSaving(false);
+      setUploadProgress('');
     }
   };
 
@@ -384,7 +394,7 @@ const AddSourceModal: React.FC<AddModalProps> = ({ onClose, onAdded }) => {
                 className="flex-1 bg-cyan-600 text-white rounded-xl py-2 text-sm font-medium hover:bg-cyan-700 disabled:opacity-50 flex items-center justify-center gap-2"
               >
                 {saving ? <RefreshCw size={14} className="animate-spin" /> : <Upload size={14} />}
-                {saving ? 'Processing...' : uploadFiles.length > 1 ? `Upload ${uploadFiles.length} Workbooks` : 'Upload & Process'}
+                {saving ? (uploadProgress || 'Processing...') : uploadFiles.length > 1 ? `Upload ${uploadFiles.length} Workbooks` : 'Upload & Process'}
               </button>
             </div>
           </form>

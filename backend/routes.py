@@ -21,7 +21,7 @@ def init_routes(sync_manager):
 def _get_store(source_arg: str = None):
     if not _sync_manager:
         return None
-    src = (source_arg or request.args.get('source', 'active')).strip() or 'active'
+    src = (source_arg or request.args.get('source', 'all')).strip() or 'all'
     return _sync_manager.get_store(src)
 
 
@@ -134,11 +134,15 @@ def upload_source():
                 is_active=make_active
             )
             store.update_from_raw_sheets(raw_dict, period=period)
+            _sync_manager._save_source_cache(store)
             _sync_manager._record_run(store, "success", None)
             created_sources.append(store.to_source_dict())
         except Exception as e:
             logger.error(f"Failed parsing uploaded file {filename}: {e}", exc_info=True)
             return jsonify({"error": f"Failed to parse '{filename}': {str(e)}"}), 500
+        finally:
+            import gc
+            gc.collect()
 
     _sync_manager._save_registry()
 

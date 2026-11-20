@@ -136,25 +136,34 @@ class ApiClient {
 
   async uploadSource(formData: FormData): Promise<{ source: SpreadsheetSource; sources?: SpreadsheetSource[]; message: string; sync_success: boolean }> {
     const url = `${API_BASE_URL}/sources/upload`;
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        body: formData,
-      });
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || `Upload failed with status ${response.status}`);
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          body: formData,
+        });
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          throw new Error(errorData.error || `Upload failed with status ${response.status}`);
+        }
+        return await response.json();
+      } catch (err: any) {
+        const msg = String(err?.message || '');
+        const isNetworkErr = err instanceof TypeError || /failed to fetch|networkerror|load failed/i.test(msg);
+        if (isNetworkErr && attempt === 1) {
+          // If server was cold-booting on Render free tier, wait 3 seconds and retry once
+          await new Promise((r) => setTimeout(r, 3000));
+          continue;
+        }
+        if (isNetworkErr) {
+          throw new Error(
+            `Cannot reach backend (${API_BASE_URL}). If hosted on Render free tier, the server may be cold-booting or restarting. Please wait ~30 seconds and retry.`
+          );
+        }
+        throw err;
       }
-      return await response.json();
-    } catch (err: any) {
-      const msg = String(err?.message || '');
-      if (err instanceof TypeError || /failed to fetch|networkerror|load failed/i.test(msg)) {
-        throw new Error(
-          `Cannot reach backend (${API_BASE_URL}). If hosted on Render free tier, the server may be cold-booting or restarting. Please wait ~30 seconds and retry.`
-        );
-      }
-      throw err;
     }
+    throw new Error('Upload failed');
   }
 
   async deleteSourceSheet(sourceId: string, sheetName: string): Promise<{ message: string }> {
