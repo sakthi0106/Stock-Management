@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { apiClient } from '../api/client';
 import { SpreadsheetSource, SheetInfo } from '../types';
+import { persistentStorage } from '../utils/persistentStorage';
 
 const SERVICE_ACCOUNT_EMAIL = "stockmanagement@shining-courage-510614-a2.iam.gserviceaccount.com";
 
@@ -62,10 +63,25 @@ const AddSourceModal: React.FC<AddModalProps> = ({ onClose, onAdded }) => {
     setSaving(true);
     setError('');
     try {
-      await apiClient.createSource({
+      const res = await apiClient.createSource({
         ...googleForm,
         status: 'active',
+        poll_interval_seconds: googleForm.poll_interval_seconds || 30,
       });
+
+      // Permanently store in client IndexedDB until user deletes
+      await persistentStorage.saveSource({
+        id: res.source.source_id,
+        name: res.source.name,
+        source_type: 'google_sheets',
+        spreadsheet_url_or_id: res.source.spreadsheet_id,
+        period: res.source.period,
+        description: res.source.description,
+        is_active: res.source.is_active === 1,
+        poll_interval_seconds: res.source.poll_interval_seconds || 30,
+        created_at: new Date().toISOString()
+      });
+
       onAdded();
       onClose();
     } catch (err: any) {
@@ -94,17 +110,30 @@ const AddSourceModal: React.FC<AddModalProps> = ({ onClose, onAdded }) => {
         }
         const fd = new FormData();
         fd.append('file', file);
-        if (uploadFiles.length === 1 && uploadName) {
-          fd.append('name', uploadName);
-        } else {
-          fd.append('name', file.name.replace(/\.[^/.]+$/, ''));
-        }
+        const effectiveName = (uploadFiles.length === 1 && uploadName) ? uploadName : file.name.replace(/\.[^/.]+$/, '');
+        fd.append('name', effectiveName);
         fd.append('period', uploadPeriod);
         fd.append('description', uploadDescription);
         fd.append('is_active', uploadIsActive ? 'true' : 'false');
 
-        await apiClient.uploadSource(fd);
+        const res = await apiClient.uploadSource(fd);
         uploadedCount++;
+
+        // Permanently persist the file and metadata in browser IndexedDB until user explicitly deletes it
+        const sid = res.source?.source_id || `local_${Date.now()}_${i}`;
+        await persistentStorage.saveSource({
+          id: sid,
+          name: effectiveName,
+          source_type: 'excel_upload',
+          spreadsheet_url_or_id: res.source?.spreadsheet_id || `local_file:${file.name}`,
+          period: uploadPeriod,
+          description: uploadDescription,
+          is_active: uploadIsActive,
+          file_blob: file, // Store the actual modern Excel workbook binary blob
+          file_name: file.name,
+          file_size: file.size,
+          created_at: new Date().toISOString()
+        });
 
         if (i < uploadFiles.length - 1) {
           await new Promise((r) => setTimeout(r, 500));
@@ -498,17 +527,8 @@ const SourceCard: React.FC<SourceCardProps> = ({ source, onRefresh }) => {
     if (!confirm(msg)) return;
     setActionError('');
     try {
-      await apiClient.deleteSource(source.source_id);
-      const cached = localStorage.getItem('stock_mgmt_registered_sources');
-      if (cached) {
-        try {
-          const list = JSON.parse(cached);
-          const filtered = list.filter((item: any) => item.spreadsheet_url_or_id !== source.spreadsheet_id && item.name !== source.name);
-          localStorage.setItem('stock_mgmt_registered_sources', JSON.stringify(filtered));
-        } catch {
-          // ignore
-        }
-      }
+      await apiClient.deleteSource(source.source_id).catch(() => {});
+      await persistentStorage.deleteSource(source.source_id);
       onRefresh();
     } catch (e: any) {
       setActionError(e.message || 'Failed to delete');
@@ -750,14 +770,89 @@ export function SpreadsheetSources({ refreshKey }: Props) {
     setLoading(true);
     setError('');
     try {
+      // 1. Immediately show cached sources if UI has none, avoiding any blank state
+      const localSources = await persistentStorage.getAllSources();
+      const cachedSnapshot = await persistentStorage.getSnapshot<SpreadsheetSource[]>('sources_list');
+      if (cachedSnapshot && cachedSnapshot.length > 0) {
+        setSources(cachedSnapshot);
+      }
+
+      // 2. Fetch live sources from backend
       const res = await apiClient.getSources(true);
-      if (res.sources && res.sources.length > 0) {
-        setSources(res.sources);
-      } else {
-        setSources([]);
+      const backendSources = res.sources || [];
+
+      // 3. Self-Healing Reconciliation: If Render restarted and lost ephemeral sources, restore them
+      if (localSources.length > 0) {
+        let restoredCount = 0;
+        for (const local of localSources) {
+          const existsOnBackend = backendSources.some(
+            b => b.source_id === local.id || 
+                 b.spreadsheet_id === local.spreadsheet_url_or_id || 
+                 (b.name === local.name && b.source_type === local.source_type)
+          );
+
+          if (!existsOnBackend) {
+            try {
+              if (local.source_type === 'google_sheets') {
+                await apiClient.createSource({
+                  name: local.name,
+                  spreadsheet_url_or_id: local.spreadsheet_url_or_id,
+                  period: local.period,
+                  description: local.description,
+                  is_active: local.is_active,
+                  poll_interval_seconds: local.poll_interval_seconds || 30,
+                });
+                restoredCount++;
+              } else if (local.source_type === 'excel_upload' && local.file_blob) {
+                const fd = new FormData();
+                fd.append('file', local.file_blob, local.file_name || `${local.name}.xlsx`);
+                fd.append('name', local.name);
+                fd.append('period', local.period || '');
+                fd.append('description', local.description || '');
+                fd.append('is_active', local.is_active ? 'true' : 'false');
+                await apiClient.uploadSource(fd);
+                restoredCount++;
+              }
+            } catch (healErr) {
+              console.warn('Background source healing notice:', healErr);
+            }
+          }
+        }
+
+        if (restoredCount > 0) {
+          const fresh = await apiClient.getSources(true);
+          setSources(fresh.sources || []);
+          await persistentStorage.saveSnapshot('sources_list', fresh.sources || []);
+          return;
+        }
+      }
+
+      setSources(backendSources);
+      await persistentStorage.saveSnapshot('sources_list', backendSources);
+
+      // Cache all live backend Google Sheets into persistent storage
+      for (const s of backendSources) {
+        if (s.source_type === 'google_sheets') {
+          persistentStorage.saveSource({
+            id: s.source_id,
+            name: s.name,
+            source_type: 'google_sheets',
+            spreadsheet_url_or_id: s.spreadsheet_id,
+            period: s.period || '',
+            description: s.description || '',
+            is_active: s.is_active === 1,
+            poll_interval_seconds: s.poll_interval_seconds || 30,
+            created_at: s.created_at || new Date().toISOString()
+          });
+        }
       }
     } catch (e: any) {
-      setError(e.message || 'Failed to load sources');
+      const cached = await persistentStorage.getSnapshot<SpreadsheetSource[]>('sources_list');
+      if (cached && cached.length > 0) {
+        setSources(cached);
+      } else {
+        setError(e.message || 'Failed to load sources');
+      }
     } finally {
       setLoading(false);
     }

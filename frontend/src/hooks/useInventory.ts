@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Product, InventoryFilters, SyncStatus } from '../types';
 import { apiClient } from '../api/client';
+import { persistentStorage } from '../utils/persistentStorage';
 
 export function useInventory(
   initialFilters?: Partial<InventoryFilters>,
@@ -35,6 +36,20 @@ export function useInventory(
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [syncing, setSyncing] = useState(false);
 
+  // Instant render from permanent storage cache on cold start
+  useEffect(() => {
+    persistentStorage.getSnapshot<any>('inventory_snapshot').then((cached) => {
+      if (cached && products.length === 0) {
+        setProducts(cached.items || []);
+        setTotal(cached.total || 0);
+        setTotalPages(cached.total_pages || 1);
+        setCategories(cached.categories || []);
+        setSheets(cached.sheets || []);
+        setUoms(cached.uoms || []);
+      }
+    });
+  }, []);
+
   // Sync external search updates
   useEffect(() => {
     if (initialFilters?.search !== undefined) {
@@ -64,8 +79,11 @@ export function useInventory(
       setCategories(data.categories);
       setSheets(data.sheets);
       setUoms(data.uoms);
+      persistentStorage.saveSnapshot('inventory_snapshot', data);
     } catch (err: any) {
-      setError(err.message || 'Failed to load inventory data');
+      if (products.length === 0) {
+        setError(err.message || 'Failed to load inventory data');
+      }
     } finally {
       setLoading(false);
     }

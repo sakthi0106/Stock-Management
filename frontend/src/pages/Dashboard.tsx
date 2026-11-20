@@ -3,6 +3,7 @@ import { StatCard } from '../components/StatCard';
 import { DashboardCharts } from './DashboardCharts';
 import { DashboardKPI } from '../types';
 import { apiClient } from '../api/client';
+import { persistentStorage } from '../utils/persistentStorage';
 import { Package, AlertTriangle, XCircle, ArrowLeftRight, Clock, Layers } from 'lucide-react';
 import { SourceSelector } from '../components/SourceSelector';
 
@@ -26,17 +27,30 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [retryCountdown, setRetryCountdown] = useState<number | null>(null);
 
+  useEffect(() => {
+    // Instant initial render from persistent storage cache
+    persistentStorage.getSnapshot<DashboardKPI>('dashboard_summary').then(cached => {
+      if (cached && !data) {
+        setData(cached);
+        setLoading(false);
+      }
+    });
+  }, []);
+
   const fetchDashboard = () => {
-    setLoading(true);
+    if (!data) setLoading(true);
     setFetchError(null);
     setRetryCountdown(null);
     apiClient.getDashboard(selectedSource)
       .then((res) => {
         setData(res);
+        persistentStorage.saveSnapshot('dashboard_summary', res);
       })
       .catch((err) => {
         console.error('Failed to load dashboard:', err);
-        setFetchError(err.message || 'Unable to connect to inventory backend server.');
+        if (!data) {
+          setFetchError(err.message || 'Unable to connect to inventory backend server.');
+        }
       })
       .finally(() => {
         setLoading(false);

@@ -69,7 +69,7 @@ export const SyncStatus: React.FC<SyncStatusProps> = ({ status, syncing, onRefre
             <p className="text-xs text-slate-500 mt-1 flex flex-wrap items-center gap-3">
               <span className="flex items-center gap-1 font-semibold text-slate-700">
                 <Clock size={12} className="text-cyan-600" />
-                Auto-sync: Every {status.poll_interval_seconds || 15}s
+                Auto-sync: Every {status.poll_interval_seconds || 30}s
               </span>
               <span>•</span>
               <span>Last Synced: <strong>{formatTimestamp(status.lastSuccess)}</strong> (Asia/Kolkata)</span>

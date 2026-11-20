@@ -524,6 +524,23 @@ class SyncManager:
 
             source_name = "All Connected Sheets" if len(self.sources) > 1 else (active_store.name if active_store else "Google Sheets")
 
+            # Active 30-second Auto-Sync: if 30s elapsed since last sync, trigger background sync
+            if is_live and not self._is_syncing and not self._is_paused:
+                now_utc = datetime.datetime.now(datetime.timezone.utc)
+                need_refresh = False
+                if not latest_success:
+                    need_refresh = True
+                else:
+                    try:
+                        clean_ts = latest_success.replace('Z', '+00:00')
+                        last_dt = datetime.datetime.fromisoformat(clean_ts)
+                        if (now_utc - last_dt).total_seconds() >= self.sync_interval:
+                            need_refresh = True
+                    except Exception:
+                        need_refresh = False
+                if need_refresh:
+                    threading.Thread(target=self.sync_source, args=("all", False), daemon=True).start()
+
             return {
                 "state": state,
                 "is_live_google_sheet": is_live,

@@ -414,13 +414,13 @@ def sync_refresh():
 @api_bp.route('/sync/pause', methods=['POST'])
 def sync_pause():
     _sync_manager.pause_sync()
-    return jsonify({"success": True, "message": "Automatic 15-second sync paused", "status": _sync_manager.get_status()})
+    return jsonify({"success": True, "message": "Automatic 30-second sync paused", "status": _sync_manager.get_status()})
 
 
 @api_bp.route('/sync/resume', methods=['POST'])
 def sync_resume():
     _sync_manager.resume_sync()
-    return jsonify({"success": True, "message": "Automatic 15-second sync resumed", "status": _sync_manager.get_status()})
+    return jsonify({"success": True, "message": "Automatic 30-second sync resumed", "status": _sync_manager.get_status()})
 
 
 @api_bp.route('/sync/history', methods=['GET'])

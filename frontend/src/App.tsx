@@ -35,13 +35,29 @@ export function App() {
 
   useEffect(() => {
     fetchSync();
-    // 15-second polling interval when visible for live sync status updates without overloading Render
+
+    // 15-second polling interval for live sync status updates matching 30s auto-sync cycle
     const interval = setInterval(() => {
       if (typeof document === 'undefined' || document.visibilityState === 'visible') {
         fetchSync();
       }
     }, 15000);
-    return () => clearInterval(interval);
+
+    // Immediate sync check on tab focus or visibility return (e.g. after editing Google Sheets)
+    const onActive = () => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        fetchSync();
+      }
+    };
+
+    window.addEventListener('visibilitychange', onActive);
+    window.addEventListener('focus', onActive);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('visibilitychange', onActive);
+      window.removeEventListener('focus', onActive);
+    };
   }, []);
 
   const handleManualSync = async () => {

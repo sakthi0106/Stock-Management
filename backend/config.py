@@ -18,8 +18,8 @@ class Config:
     GOOGLE_SHEETS_SPREADSHEET_ID = os.environ.get('GOOGLE_SHEETS_SPREADSHEET_ID', '').strip()
     GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON', '').strip()
 
-    # Polling frequency (seconds) - 15s gives responsive Google Sheets auto-sync
-    SYNC_INTERVAL_SECONDS = int(os.environ.get('SYNC_INTERVAL_SECONDS', 15))
+    # Polling frequency (seconds) - 30s gives responsive Google Sheets auto-sync
+    SYNC_INTERVAL_SECONDS = int(os.environ.get('SYNC_INTERVAL_SECONDS', 30))
 
     # Uploads folder
     UPLOAD_FOLDER = backend_dir / 'uploads'

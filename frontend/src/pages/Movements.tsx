@@ -3,6 +3,7 @@ import { DateMovementPanel } from '../components/DateMovementPanel';
 import { Movement } from '../types';
 import { apiClient } from '../api/client';
 import { SourceSelector } from '../components/SourceSelector';
+import { persistentStorage } from '../utils/persistentStorage';
 
 interface MovementsProps {
   refreshKey?: string | null;
@@ -23,7 +24,15 @@ export const Movements: React.FC<MovementsProps> = ({
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    setLoading(true);
+    persistentStorage.getSnapshot<Movement[]>('movements_snapshot').then((cached) => {
+      if (cached && movements.length === 0) {
+        setMovements(cached);
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    if (movements.length === 0) setLoading(true);
     apiClient.getMovements({
       product_id: productFilter,
       from_date: fromDate,
@@ -31,7 +40,12 @@ export const Movements: React.FC<MovementsProps> = ({
       movement_type: movementType,
       source: selectedSource,
     })
-      .then((res) => setMovements(res.items))
+      .then((res) => {
+        setMovements(res.items);
+        if (!fromDate && !toDate && !productFilter && !movementType) {
+          persistentStorage.saveSnapshot('movements_snapshot', res.items);
+        }
+      })
       .catch((err) => console.error(err))
       .finally(() => setLoading(false));
   }, [fromDate, toDate, productFilter, movementType, refreshKey, selectedSource]);
