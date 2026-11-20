@@ -28,15 +28,19 @@ export function App() {
     try {
       const res = await apiClient.getSyncStatus();
       setSyncStatus(res);
-    } catch (e) {
-      console.warn('Sync status fetch failed', e);
+    } catch {
+      // Background poll failure during cold-boot is expected; silently wait for next poll
     }
   };
 
   useEffect(() => {
     fetchSync();
-    // 10-second polling interval for live sync status updates so changes in Google Sheets reflect automatically
-    const interval = setInterval(fetchSync, 5000);
+    // 15-second polling interval when visible for live sync status updates without overloading Render
+    const interval = setInterval(() => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        fetchSync();
+      }
+    }, 15000);
     return () => clearInterval(interval);
   }, []);
 

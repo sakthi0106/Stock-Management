@@ -83,6 +83,7 @@ const AddSourceModal: React.FC<AddModalProps> = ({ onClose, onAdded }) => {
     }
     setSaving(true);
     setError('');
+    let uploadedCount = 0;
     try {
       for (let i = 0; i < uploadFiles.length; i++) {
         const file = uploadFiles[i];
@@ -103,11 +104,19 @@ const AddSourceModal: React.FC<AddModalProps> = ({ onClose, onAdded }) => {
         fd.append('is_active', uploadIsActive ? 'true' : 'false');
 
         await apiClient.uploadSource(fd);
+        uploadedCount++;
+
+        if (i < uploadFiles.length - 1) {
+          await new Promise((r) => setTimeout(r, 500));
+        }
       }
-      onAdded();
       onClose();
+      setTimeout(() => {
+        onAdded();
+      }, 300);
     } catch (err: any) {
-      setError(err.message || 'Failed to upload Excel workbook(s).');
+      const prefix = uploadedCount > 0 ? `Uploaded ${uploadedCount}/${uploadFiles.length} files. ` : '';
+      setError(`${prefix}${err.message || 'Failed to upload Excel workbook(s).'}`);
     } finally {
       setSaving(false);
       setUploadProgress('');
@@ -744,35 +753,7 @@ export function SpreadsheetSources({ refreshKey }: Props) {
       const res = await apiClient.getSources(true);
       if (res.sources && res.sources.length > 0) {
         setSources(res.sources);
-        const googleSources = res.sources
-          .filter(s => s.spreadsheet_id && !s.spreadsheet_id.startsWith('local_file:'))
-          .map(s => ({
-            name: s.name,
-            spreadsheet_url_or_id: s.spreadsheet_id,
-            period: s.period || '',
-            description: s.description || '',
-            is_active: s.is_active === 1,
-          }));
-        if (googleSources.length > 0) {
-          localStorage.setItem('stock_mgmt_registered_sources', JSON.stringify(googleSources));
-        }
       } else {
-        const cached = localStorage.getItem('stock_mgmt_registered_sources');
-        if (cached) {
-          try {
-            const savedList = JSON.parse(cached);
-            if (Array.isArray(savedList) && savedList.length > 0) {
-              for (const item of savedList) {
-                await apiClient.createSource(item).catch(() => {});
-              }
-              const reloaded = await apiClient.getSources(true);
-              setSources(reloaded.sources);
-              return;
-            }
-          } catch {
-            // ignore JSON parse errors
-          }
-        }
         setSources([]);
       }
     } catch (e: any) {
@@ -887,8 +868,17 @@ export function SpreadsheetSources({ refreshKey }: Props) {
       )}
 
       {error && (
-        <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl p-3 text-sm flex items-center gap-2">
-          <AlertCircle size={16} /> {error}
+        <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl p-3 text-sm flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <AlertCircle size={16} className="flex-shrink-0" />
+            <span>{error}</span>
+          </div>
+          <button
+            onClick={fetchSources}
+            className="text-xs bg-red-100 hover:bg-red-200 text-red-800 font-semibold px-2.5 py-1 rounded-lg transition flex-shrink-0"
+          >
+            Retry
+          </button>
         </div>
       )}
 

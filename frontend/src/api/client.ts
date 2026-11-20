@@ -30,12 +30,12 @@ class ApiClient {
     }
 
     const isIdempotent = method === 'GET' || method === 'HEAD';
-    const maxAttempts = isIdempotent ? 3 : 1;
+    const maxAttempts = isIdempotent ? 3 : 2;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const controller = new AbortController();
-      // 75-second timeout to allow sufficient window for Render free-tier cold boot
-      const timeoutId = setTimeout(() => controller.abort(), 75000);
+      // 90-second timeout to allow sufficient window for Render free-tier cold boot
+      const timeoutId = setTimeout(() => controller.abort(), 90000);
 
       try {
         const response = await fetch(url, {
@@ -49,9 +49,9 @@ class ApiClient {
         clearTimeout(timeoutId);
 
         if (!response.ok) {
-          // Retry transient Render proxy / gateway errors on idempotent GET/HEAD requests
-          if (isIdempotent && [502, 503, 504].includes(response.status) && attempt < maxAttempts && !options?.signal?.aborted) {
-            await new Promise((r) => setTimeout(r, attempt * 3000));
+          // Retry transient Render proxy / gateway errors on 502, 503, 504
+          if ([502, 503, 504].includes(response.status) && attempt < maxAttempts && !options?.signal?.aborted) {
+            await new Promise((r) => setTimeout(r, attempt * 2000));
             continue;
           }
           const errorData = await response.json().catch(() => ({}));
@@ -62,6 +62,10 @@ class ApiClient {
       } catch (error: any) {
         clearTimeout(timeoutId);
         if (error?.name === 'AbortError') {
+          if (attempt < maxAttempts && !options?.signal?.aborted) {
+            await new Promise((r) => setTimeout(r, 2000));
+            continue;
+          }
           const timeoutErr = new Error('Server took too long to respond. The cloud service may be cold-booting, please retry in a few moments.');
           console.error(`API request timeout [${endpoint}]`);
           throw timeoutErr;
@@ -72,8 +76,8 @@ class ApiClient {
           error instanceof TypeError ||
           /failed to fetch|networkerror|load failed/i.test(msg);
 
-        if (isIdempotent && isNetworkErr && attempt < maxAttempts && !options?.signal?.aborted) {
-          await new Promise((r) => setTimeout(r, attempt * 3000));
+        if (isNetworkErr && attempt < maxAttempts && !options?.signal?.aborted) {
+          await new Promise((r) => setTimeout(r, attempt * 2000));
           continue;
         }
 
@@ -136,23 +140,34 @@ class ApiClient {
 
   async uploadSource(formData: FormData): Promise<{ source: SpreadsheetSource; sources?: SpreadsheetSource[]; message: string; sync_success: boolean }> {
     const url = `${API_BASE_URL}/sources/upload`;
-    for (let attempt = 1; attempt <= 2; attempt++) {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const controller = new AbortController();
+      // 120-second timeout for large multi-sheet Excel files
+      const timeoutId = setTimeout(() => controller.abort(), 120000);
       try {
         const response = await fetch(url, {
           method: 'POST',
           body: formData,
+          signal: controller.signal,
         });
+        clearTimeout(timeoutId);
         if (!response.ok) {
+          // Retry on 502/503/504 while Render is warming up
+          if ([502, 503, 504].includes(response.status) && attempt < 3) {
+            await new Promise((r) => setTimeout(r, attempt * 2500));
+            continue;
+          }
           const errorData = await response.json().catch(() => ({}));
           throw new Error(errorData.error || `Upload failed with status ${response.status}`);
         }
         return await response.json();
       } catch (err: any) {
+        clearTimeout(timeoutId);
         const msg = String(err?.message || '');
-        const isNetworkErr = err instanceof TypeError || /failed to fetch|networkerror|load failed/i.test(msg);
-        if (isNetworkErr && attempt === 1) {
-          // If server was cold-booting on Render free tier, wait 3 seconds and retry once
-          await new Promise((r) => setTimeout(r, 3000));
+        const isNetworkErr = err instanceof TypeError || /failed to fetch|networkerror|load failed/i.test(msg) || err?.name === 'AbortError';
+        if (isNetworkErr && attempt < 3) {
+          // If server was cold-booting on Render free tier, wait 2.5s and retry
+          await new Promise((r) => setTimeout(r, attempt * 2500));
           continue;
         }
         if (isNetworkErr) {
@@ -163,7 +178,7 @@ class ApiClient {
         throw err;
       }
     }
-    throw new Error('Upload failed');
+    throw new Error('Upload failed after retries.');
   }
 
   async deleteSourceSheet(sourceId: string, sheetName: string): Promise<{ message: string }> {
