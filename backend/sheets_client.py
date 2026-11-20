@@ -21,10 +21,15 @@ _CACHED_DISCOVERY_DOC = None
 
 
 def to_a1_range(sheet_name: str) -> str:
-    """Formats sheet name for Google Sheets A1 notation range syntax."""
-    s = str(sheet_name).strip()
+    """Formats sheet name for Google Sheets A1 notation range syntax.
+    Preserves exact sheet title (including trailing/leading whitespace) and
+    ensures any name with whitespace or special characters is properly single-quoted.
+    """
+    s = str(sheet_name)
+    # Simple alphanumeric + underscore sheet names (without any spaces) do not require quoting
     if re.match(r'^[a-zA-Z0-9_]+$', s):
         return s
+    # Names with spaces or special characters must be wrapped in single quotes, with interior quotes doubled
     escaped = s.replace("'", "''")
     return f"'{escaped}'"
 
@@ -170,12 +175,24 @@ class GoogleSheetsClient:
                 for single_name in batch_names:
                     try:
                         clean_r = to_a1_range(single_name)
-                        s_res = self._service.spreadsheets().values().get(
-                            spreadsheetId=self.spreadsheet_id,
-                            range=clean_r,
-                            valueRenderOption='UNFORMATTED_VALUE',
-                            dateTimeRenderOption='FORMATTED_STRING'
-                        ).execute()
+                        try:
+                            s_res = self._service.spreadsheets().values().get(
+                                spreadsheetId=self.spreadsheet_id,
+                                range=clean_r,
+                                valueRenderOption='UNFORMATTED_VALUE',
+                                dateTimeRenderOption='FORMATTED_STRING'
+                            ).execute()
+                        except Exception as try_err:
+                            if single_name.strip() != single_name:
+                                alt_r = to_a1_range(single_name.strip())
+                                s_res = self._service.spreadsheets().values().get(
+                                    spreadsheetId=self.spreadsheet_id,
+                                    range=alt_r,
+                                    valueRenderOption='UNFORMATTED_VALUE',
+                                    dateTimeRenderOption='FORMATTED_STRING'
+                                ).execute()
+                            else:
+                                raise try_err
                         result[single_name] = s_res.get('values') or []
                     except Exception as single_err:
                         logger.error(f"Failed to fetch worksheet '{single_name}': {single_err}")

@@ -9,8 +9,19 @@ sys.path.insert(0, str(backend_dir))
 
 from spreadsheet_parser import UniversalParser, parse_numeric, parse_date_string
 from inventory_store import InventoryDataStore, extract_spreadsheet_id
+from sheets_client import to_a1_range
 from sync_manager import SyncManager
 from app import create_app
+
+
+def test_to_a1_range():
+    assert to_a1_range("Busbar") == "Busbar"
+    assert to_a1_range("ACCESORIES") == "ACCESORIES"
+    assert to_a1_range("SLEEVE ") == "'SLEEVE '"
+    assert to_a1_range(" Cable,Lug,Lamp,TB,Truff") == "' Cable,Lug,Lamp,TB,Truff'"
+    assert to_a1_range("Fab Sheets") == "'Fab Sheets'"
+    assert to_a1_range("Fasteners") == "Fasteners"
+    assert to_a1_range("Jane's Sheet") == "'Jane''s Sheet'"
 
 
 def test_extract_spreadsheet_id():
