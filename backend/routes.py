@@ -122,6 +122,9 @@ def upload_source():
         try:
             extracted = reader.extract_from_excel(save_path)
             raw_dict = {sname: sdata.get('values', []) for sname, sdata in extracted.get('sheets', {}).items()}
+            del extracted
+            import gc
+            gc.collect()
 
             # Keep existing sources intact; activate the last uploaded source if requested
             make_active = set_active and (idx == len(uploaded_files) - 1)
@@ -134,6 +137,9 @@ def upload_source():
                 is_active=make_active
             )
             store.update_from_raw_sheets(raw_dict, period=period)
+            del raw_dict
+            gc.collect()
+
             _sync_manager._save_source_cache(store)
             _sync_manager._record_run(store, "success", None)
             created_sources.append(store.to_source_dict())

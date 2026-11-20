@@ -248,10 +248,10 @@ class SyncManager:
                 for sname, recs in store.dynamic_records.items():
                     all_dyn_recs[f"{prefix}{sname}"] = recs
 
-            # Sort and cap movements to 3000 max
+            # Sort and cap movements to 1500 max to maintain low memory profile
             all_movs.sort(key=lambda m: str(m.get("date") or ""), reverse=True)
             combined.products = all_prods
-            combined.movements = all_movs[:3000]
+            combined.movements = all_movs[:1500]
             combined.worksheets = all_worksheets
             combined.dynamic_columns = all_dyn_cols
             combined.dynamic_records = all_dyn_recs
@@ -374,24 +374,27 @@ class SyncManager:
             return False
 
         if store.source_type == "excel_upload":
-            clean_path = store.spreadsheet_id
-            if clean_path.startswith("local_file:"):
-                clean_path = clean_path.split("local_file:", 1)[1]
-            if os.path.exists(clean_path):
-                try:
-                    reader = UniversalSpreadsheetReader()
-                    extracted = reader.extract_from_excel(clean_path)
-                    raw_dict = {sname: sdata.get('values', []) for sname, sdata in extracted.get('sheets', {}).items()}
-                    store.update_from_raw_sheets(raw_dict, period=store.period)
-                    store.last_sync_status = "success"
-                    store.last_sync_error = None
-                    self._save_source_cache(store)
-                    self._save_registry()
-                except Exception as ex:
-                    logger.warning(f"Excel sync notice for {store.source_id}: {ex}")
-            else:
-                store.last_sync_status = "success"
-                store.last_sync_error = None
+            # An uploaded Excel workbook's data is already resident in memory/cache.
+            # Avoid re-reading large Excel files with openpyxl during sync to protect Render's 512MB RAM ceiling.
+            if not store.products:
+                clean_path = store.spreadsheet_id
+                if clean_path.startswith("local_file:"):
+                    clean_path = clean_path.split("local_file:", 1)[1]
+                if os.path.exists(clean_path):
+                    try:
+                        reader = UniversalSpreadsheetReader()
+                        extracted = reader.extract_from_excel(clean_path)
+                        raw_dict = {sname: sdata.get('values', []) for sname, sdata in extracted.get('sheets', {}).items()}
+                        store.update_from_raw_sheets(raw_dict, period=store.period)
+                        self._save_source_cache(store)
+                        self._save_registry()
+                        del extracted
+                        del raw_dict
+                        gc.collect()
+                    except Exception as ex:
+                        logger.warning(f"Excel sync notice for {store.source_id}: {ex}")
+            store.last_sync_status = "success"
+            store.last_sync_error = None
             self._record_run(store, "success", None)
             return True
 

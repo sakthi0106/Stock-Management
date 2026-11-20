@@ -117,11 +117,12 @@ class InventoryDataStore:
             date_col_idx = roles.get('date')
             movement_pairs = roles.get('date_movement_pairs', [])
 
-            # Build dynamic column metadata
+            # Build dynamic column metadata efficiently with sample window
             col_metas: List[Dict[str, Any]] = []
+            sample_rows = data_rows[:60]
             for c_i, col_name in enumerate(unique_headers):
-                col_vals = [r[c_i] for r in data_rows if c_i < len(r) and r[c_i] is not None and str(r[c_i]).strip() != ""]
-                populated_pct = round((len(col_vals) / len(data_rows)) * 100, 1) if data_rows else 0.0
+                col_vals = [r[c_i] for r in sample_rows if c_i < len(r) and r[c_i] is not None and str(r[c_i]).strip() != ""]
+                populated_pct = round((len(col_vals) / len(sample_rows)) * 100, 1) if sample_rows else 0.0
                 inferred_role = "unknown"
                 if c_i == p_idx:
                     inferred_role = "product_id"
@@ -204,14 +205,16 @@ class InventoryDataStore:
                 if not any(cell is not None and str(cell).strip() != "" for cell in row):
                     continue
 
-                # Build dynamic raw_data preserving ALL columns of this row
+                # Build dynamic raw_data preserving columns of this row
                 raw_data: Dict[str, Any] = {}
                 extra_fields: Dict[str, Any] = {}
                 for c_i, col_name in enumerate(unique_headers):
                     val = row[c_i] if c_i < len(row) else ""
                     raw_data[col_name] = val if val is not None else ""
-                    if not any(term in col_name.lower() for term in EXCLUDED_QTY_TERMS):
-                        extra_fields[col_name] = val if val is not None else ""
+                    if val is not None and str(val).strip() != "":
+                        lower_col = col_name.lower()
+                        if not any(term in lower_col for term in EXCLUDED_QTY_TERMS) and not re.search(r'\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{2,4}', lower_col):
+                            extra_fields[col_name] = val
 
                 part_no = str(row[p_idx]).strip() if p_idx is not None and p_idx < len(row) and row[p_idx] is not None else ""
                 desc = str(row[d_idx]).strip() if d_idx is not None and d_idx < len(row) and row[d_idx] is not None else ""
@@ -221,8 +224,8 @@ class InventoryDataStore:
                     uom = "NOS"
 
                 if not part_no and not desc:
-                    # Still preserve the dynamic record so all rows are visible in Spreadsheet Intelligence
-                    if len(sheet_dyn_records) < 300:
+                    # Still preserve the dynamic record so rows are visible in Spreadsheet Intelligence
+                    if len(sheet_dyn_records) < 60:
                         sheet_dyn_records.append({
                             "id": r_idx + 1,
                             "source_id": self.source_id,
@@ -278,7 +281,7 @@ class InventoryDataStore:
                     else:
                         stock_status = "In Stock"
 
-                if len(sheet_dyn_records) < 300:
+                if len(sheet_dyn_records) < 60:
                     sheet_dyn_records.append({
                         "id": r_idx + 1,
                         "source_id": self.source_id,
@@ -338,10 +341,10 @@ class InventoryDataStore:
                     existing_item["out_qty"] += total_out
                     existing_item["source_row"] = header_rows_consumed + r_idx + 1
 
-                # 1. Extract movements from date-paired columns
+                # 1. Extract movements from date-paired columns (bounded for 512MB RAM ceiling)
                 if movement_pairs:
                     for col_idx, dt_str, m_type in movement_pairs:
-                        if col_idx < len(row):
+                        if col_idx < len(row) and len(new_movements) < 2000:
                             qty = parse_numeric(row[col_idx])
                             if qty is not None and qty > 0:
                                 new_movements.append({
@@ -452,8 +455,8 @@ class InventoryDataStore:
 
         # Atomic swap
         self.products = new_products
-        # Cap movements to 3000 to prevent unbounded RAM growth on Render
-        self.movements = sorted(new_movements, key=lambda m: (m['date'], m['part_no']), reverse=True)[:3000]
+        # Cap movements to 1500 to prevent unbounded RAM growth on Render
+        self.movements = sorted(new_movements, key=lambda m: (m['date'], m['part_no']), reverse=True)[:1500]
         self.worksheets = new_worksheets
         self.dynamic_columns = new_dyn_cols
         self.dynamic_records = new_dyn_recs
