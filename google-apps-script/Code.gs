@@ -229,17 +229,25 @@ function doGet(e) {
     var oosCount = 0;
     var healthyCount = 0;
     var catMap = {};
+    var uomQuantities = {};
+    var inwardByUom = {};
+    var outwardByUom = {};
 
     for (var i = 0; i < prods.length; i++) {
       var p = prods[i];
       var cStock = p.current_stock || 0;
       var uPrice = p.unit_price || 0;
       var val = cStock * uPrice;
+      var uom = p.unit || 'PCS';
 
       totalValue += val;
       totalUnits += cStock;
       totalIn += (p.total_in || 0);
       totalOut += (p.total_out || 0);
+
+      uomQuantities[uom] = (uomQuantities[uom] || 0) + cStock;
+      inwardByUom[uom] = (inwardByUom[uom] || 0) + (p.total_in || 0);
+      outwardByUom[uom] = (outwardByUom[uom] || 0) + (p.total_out || 0);
 
       if (p.status === 'OUT_OF_STOCK') {
         oosCount++;
@@ -277,6 +285,7 @@ function doGet(e) {
 
     return jsonResponse({
       total_products: prods.length,
+      in_stock_count: healthyCount + lowCount,
       total_inventory_value: Math.round(totalValue * 100) / 100,
       total_units_in_stock: totalUnits,
       total_stock_in: totalIn,
@@ -284,10 +293,24 @@ function doGet(e) {
       low_stock_count: lowCount,
       out_of_stock_count: oosCount,
       healthy_stock_count: healthyCount,
+      total_movements_count: parsed.movements.length,
+      uom_quantities: uomQuantities,
+      inward_by_uom: inwardByUom,
+      outward_by_uom: outwardByUom,
+      status_distribution: [
+        { status: 'HEALTHY', count: healthyCount },
+        { status: 'LOW_STOCK', count: lowCount },
+        { status: 'OUT_OF_STOCK', count: oosCount }
+      ],
       top_low_stock: lowStockItems,
       category_distribution: catDist,
       recent_movements: parsed.movements.slice(0, 15),
       daily_trends: [],
+      last_updated: new Date().toISOString(),
+      sync_status: {
+        state: 'connected',
+        is_live_google_sheet: true
+      },
       data_quality: {
         score: prods.length > 0 ? 98 : 100,
         total_rows: prods.length,

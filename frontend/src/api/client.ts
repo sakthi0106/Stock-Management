@@ -63,6 +63,27 @@ class ApiClient {
       action = 'inventory';
     } else if (pathPart === 'sources') {
       action = 'sources';
+    } else if (pathPart === 'sync/status') {
+      return {
+        state: 'connected',
+        is_live_google_sheet: true,
+        is_paused: false,
+        poll_interval_seconds: 30,
+        lastSuccess: new Date().toISOString(),
+        lastError: null,
+        source: 'Google Apps Script (Real-time)',
+        itemsSynced: 0,
+        sheetsProcessed: 1,
+        sheets: [],
+        nextSync: null,
+      } as unknown as T;
+    } else if (pathPart === 'data-quality') {
+      return {
+        total_issues: 0,
+        issues: [],
+        duplicate_ids: [],
+        sheets_analyzed: 1,
+      } as unknown as T;
     } else if (pathPart.startsWith('sources/')) {
       if (pathPart.includes('/sheets')) {
         action = 'sheets';
@@ -79,7 +100,7 @@ class ApiClient {
       }
     } else if (pathPart === 'movements') {
       action = 'movements';
-    } else if (pathPart === 'sync') {
+    } else if (pathPart.startsWith('sync')) {
       action = 'sync';
     } else {
       action = pathPart;

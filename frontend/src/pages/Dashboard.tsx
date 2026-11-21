@@ -2,9 +2,9 @@ import React, { useEffect, useState } from 'react';
 import { StatCard } from '../components/StatCard';
 import { DashboardCharts } from './DashboardCharts';
 import { DashboardKPI } from '../types';
-import { apiClient } from '../api/client';
+import { apiClient, getAppsScriptUrl, setAppsScriptUrl } from '../api/client';
 import { persistentStorage } from '../utils/persistentStorage';
-import { Package, AlertTriangle, XCircle, ArrowLeftRight, Clock, Layers } from 'lucide-react';
+import { Package, AlertTriangle, XCircle, ArrowLeftRight, Clock, Layers, Zap, RefreshCw } from 'lucide-react';
 import { SourceSelector } from '../components/SourceSelector';
 
 interface DashboardProps {
@@ -26,6 +26,20 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [retryCountdown, setRetryCountdown] = useState<number | null>(null);
+  const [quickGasUrl, setQuickGasUrl] = useState(getAppsScriptUrl());
+  const [connectingGas, setConnectingGas] = useState(false);
+
+  const handleQuickConnect = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!quickGasUrl.trim()) return;
+    setConnectingGas(true);
+    setFetchError(null);
+    setAppsScriptUrl(quickGasUrl.trim());
+    setTimeout(() => {
+      setConnectingGas(false);
+      fetchDashboard();
+    }, 400);
+  };
 
   useEffect(() => {
     // Instant initial render from persistent storage cache
@@ -82,25 +96,47 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   if (fetchError && !data) {
     return (
-      <div className="p-8 bg-rose-50 border border-rose-200 rounded-2xl text-center space-y-4">
+      <div className="p-8 bg-rose-50/90 border border-rose-200 rounded-2xl text-center space-y-4 max-w-2xl mx-auto my-8 shadow-sm">
         <div className="inline-flex p-3 bg-rose-100 text-rose-700 rounded-full">
           <AlertTriangle size={28} />
         </div>
         <h3 className="text-lg font-bold text-rose-900">Failed to Load Inventory Dashboard</h3>
-        <p className="text-sm text-rose-600 max-w-md mx-auto">{fetchError}</p>
+        <p className="text-sm text-rose-700 max-w-lg mx-auto bg-white/80 p-3 rounded-xl border border-rose-200 font-mono text-xs">
+          {fetchError}
+        </p>
+
+        {/* Quick URL updater right on dashboard */}
+        <form onSubmit={handleQuickConnect} className="mt-4 pt-4 border-t border-rose-200/80 flex flex-col sm:flex-row gap-2 max-w-xl mx-auto">
+          <input
+            type="text"
+            value={quickGasUrl}
+            onChange={(e) => setQuickGasUrl(e.target.value)}
+            placeholder="Paste your Web App URL (https://script.google.com/macros/s/.../exec)"
+            className="flex-1 px-3.5 py-2 text-xs rounded-xl border border-slate-300 bg-white text-slate-800 placeholder-slate-400 focus:outline-hidden focus:border-cyan-500 font-mono"
+          />
+          <button
+            type="submit"
+            disabled={connectingGas}
+            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 transition shadow-xs"
+          >
+            {connectingGas ? <RefreshCw size={13} className="animate-spin" /> : <Zap size={13} />}
+            Connect &amp; Load
+          </button>
+        </form>
+
         <div className="flex items-center justify-center gap-3 flex-wrap pt-2">
           <button
             onClick={fetchDashboard}
-            className="px-5 py-2.5 bg-rose-600 text-white rounded-xl text-sm font-semibold hover:bg-rose-700 shadow-sm transition active:scale-95"
+            className="px-5 py-2 bg-rose-600 text-white rounded-xl text-xs font-semibold hover:bg-rose-700 shadow-sm transition"
           >
             {retryCountdown !== null ? `Retrying in ${retryCountdown}s...` : 'Retry Loading'}
           </button>
           <button
             type="button"
             onClick={() => window.dispatchEvent(new CustomEvent('switch-tab', { detail: 'sources' }))}
-            className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-semibold shadow-sm transition active:scale-95"
+            className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-xl text-xs font-semibold shadow-sm transition"
           >
-            ⚡ Connect Google Apps Script (No Wait)
+            Go to Spreadsheet Sources Settings
           </button>
         </div>
       </div>
@@ -213,7 +249,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </span>
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 lg:grid-cols-6 gap-3">
-          {Object.entries(data.uom_quantities).map(([uom, qty]) => {
+          {Object.entries(data.uom_quantities || {}).map(([uom, qty]) => {
             if (uom === 'NA' && qty === 0) return null;
             return (
               <div key={uom} className="bg-slate-50 p-3 rounded-xl border border-slate-200 text-center hover:bg-slate-100/60 transition-colors">
