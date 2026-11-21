@@ -61,7 +61,16 @@ function doGet(e) {
     }
 
     if (action === 'sources') {
-      var sheets = ss.getSheets();
+      var allSheets = ss.getSheets();
+      var gridCount = 0;
+      for (var gi = 0; gi < allSheets.length; gi++) {
+        try {
+          if (allSheets[gi].getType && allSheets[gi].getType() === SpreadsheetApp.SheetType.GRID) {
+            gridCount++;
+          }
+        } catch (e) {}
+      }
+
       var sourceList = [{
         source_id: "gas_" + ss.getId().substring(0, 8),
         name: ss.getName() || "Google Spreadsheet Master",
@@ -75,7 +84,7 @@ function doGet(e) {
         last_sync_status: "success",
         last_sync_error: null,
         items_count: 0,
-        sheets_count: sheets.length
+        sheets_count: gridCount || allSheets.length
       }];
 
       var invData = parseSpreadsheetData(ss);
@@ -92,17 +101,22 @@ function doGet(e) {
       var sheetInfos = [];
       for (var sIdx = 0; sIdx < allSheets.length; sIdx++) {
         var curS = allSheets[sIdx];
-        if (curS.isSheetHidden()) continue;
-        var rCount = curS.getLastRow();
-        var cCount = curS.getLastColumn();
-        sheetInfos.push({
-          id: sIdx + 1,
-          sheet_name: curS.getName(),
-          sheet_index: sIdx,
-          row_count: rCount,
-          col_count: cCount,
-          is_active: 1
-        });
+        try {
+          if (curS.getType && curS.getType() !== SpreadsheetApp.SheetType.GRID) continue;
+          if (curS.isSheetHidden && curS.isSheetHidden()) continue;
+          var rCount = curS.getLastRow();
+          var cCount = curS.getLastColumn();
+          sheetInfos.push({
+            id: sIdx + 1,
+            sheet_name: curS.getName(),
+            sheet_index: sIdx,
+            row_count: rCount,
+            col_count: cCount,
+            is_active: 1
+          });
+        } catch (she) {
+          continue;
+        }
       }
       return jsonResponse({
         source_id: "gas_" + ss.getId().substring(0, 8),
@@ -317,18 +331,48 @@ function parseSpreadsheetData(ss) {
 
   for (var s = 0; s < sheets.length; s++) {
     var ws = sheets[s];
-    if (ws.isSheetHidden()) continue;
 
-    var sName = ws.getName();
-    sheetsList.push(sName);
+    // Safely skip Chart / Object sheets (throws "The action is not supported for the OBJECT sheet")
+    try {
+      if (ws.getType && ws.getType() !== SpreadsheetApp.SheetType.GRID) {
+        continue;
+      }
+      if (ws.isSheetHidden && ws.isSheetHidden()) {
+        continue;
+      }
+    } catch (typeErr) {
+      continue;
+    }
 
-    var lastRow = ws.getLastRow();
-    var lastCol = ws.getLastColumn();
+    var sName = "";
+    try {
+      sName = ws.getName();
+    } catch (nameErr) {
+      continue;
+    }
+
+    var lastRow = 0;
+    var lastCol = 0;
+    try {
+      lastRow = ws.getLastRow();
+      lastCol = ws.getLastColumn();
+    } catch (dimErr) {
+      continue;
+    }
+
     if (lastRow < 2 || lastCol < 1) continue;
 
-    // Read full sheet data range
-    var data = ws.getRange(1, 1, lastRow, lastCol).getValues();
+    // Read full sheet data range safely
+    var data = null;
+    try {
+      data = ws.getRange(1, 1, lastRow, lastCol).getValues();
+    } catch (rangeErr) {
+      continue;
+    }
+
     if (!data || data.length < 2) continue;
+
+    sheetsList.push(sName);
 
     // Detect header row by scanning first 10 rows
     var headerRowIndex = 0;
