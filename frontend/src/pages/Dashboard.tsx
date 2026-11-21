@@ -88,12 +88,21 @@ export const Dashboard: React.FC<DashboardProps> = ({
         </div>
         <h3 className="text-lg font-bold text-rose-900">Failed to Load Inventory Dashboard</h3>
         <p className="text-sm text-rose-600 max-w-md mx-auto">{fetchError}</p>
-        <button
-          onClick={fetchDashboard}
-          className="px-5 py-2.5 bg-rose-600 text-white rounded-xl text-sm font-semibold hover:bg-rose-700 shadow-sm transition active:scale-95"
-        >
-          {retryCountdown !== null ? `Retrying in ${retryCountdown}s...` : 'Retry Loading'}
-        </button>
+        <div className="flex items-center justify-center gap-3 flex-wrap pt-2">
+          <button
+            onClick={fetchDashboard}
+            className="px-5 py-2.5 bg-rose-600 text-white rounded-xl text-sm font-semibold hover:bg-rose-700 shadow-sm transition active:scale-95"
+          >
+            {retryCountdown !== null ? `Retrying in ${retryCountdown}s...` : 'Retry Loading'}
+          </button>
+          <button
+            type="button"
+            onClick={() => window.dispatchEvent(new CustomEvent('switch-tab', { detail: 'sources' }))}
+            className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-semibold shadow-sm transition active:scale-95"
+          >
+            ⚡ Connect Google Apps Script (No Wait)
+          </button>
+        </div>
       </div>
     );
   }

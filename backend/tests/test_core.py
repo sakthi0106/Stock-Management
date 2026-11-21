@@ -163,3 +163,20 @@ def test_latest_opening_stock_reflection():
     # Latest opening stock should be 90 (from later row)
     assert prod["opening_stock"] == 90
     assert prod["current_stock"] == 85
+
+
+def test_delete_source_and_tombstones():
+    sm = SyncManager()
+    s = sm.register_source(name="Temp To Delete", spreadsheet_url_or_id="temp_sheet_999")
+    sid = s.source_id
+    assert sid in sm.sources
+
+    # Delete source
+    ok = sm.delete_source(sid)
+    assert ok is True
+    assert sid not in sm.sources
+    assert sid in sm.deleted_source_ids
+    assert "temp_sheet_999" in sm.deleted_source_ids
+
+    # Deleting again is idempotent and returns True
+    assert sm.delete_source(sid) is True

@@ -19,8 +19,111 @@ const API_BASE_URL = RAW_API_BASE_URL.startsWith('http') && !RAW_API_BASE_URL.en
   ? `${RAW_API_BASE_URL}/api`
   : RAW_API_BASE_URL;
 
+const GAS_STORAGE_KEY = 'stock_mgmt_gas_url';
+
+export function getAppsScriptUrl(): string {
+  try {
+    const stored = localStorage.getItem(GAS_STORAGE_KEY);
+    if (stored && stored.trim().startsWith('http')) return stored.trim();
+  } catch {}
+  const envGas = (import.meta.env.VITE_APPS_SCRIPT_URL || '').trim();
+  if (envGas.startsWith('http')) return envGas;
+  if (RAW_API_BASE_URL.includes('script.google.com')) return RAW_API_BASE_URL;
+  return '';
+}
+
+export function setAppsScriptUrl(url: string): void {
+  try {
+    if (!url || !url.trim()) {
+      localStorage.removeItem(GAS_STORAGE_KEY);
+    } else {
+      localStorage.setItem(GAS_STORAGE_KEY, url.trim());
+    }
+  } catch {}
+}
+
 class ApiClient {
+  public isAppsScriptMode(): boolean {
+    return Boolean(getAppsScriptUrl());
+  }
+
+  private async requestAppsScript<T>(endpoint: string, options?: RequestInit, gasUrl?: string): Promise<T> {
+    const baseUrl = gasUrl || getAppsScriptUrl();
+    const cleanEndpoint = endpoint.startsWith('/') ? endpoint.slice(1) : endpoint;
+    const [pathPart, queryPart] = cleanEndpoint.split('?');
+
+    let action = 'dashboard';
+    const params = new URLSearchParams(queryPart || '');
+
+    if (pathPart === 'health') {
+      action = 'health';
+    } else if (pathPart === 'dashboard') {
+      action = 'dashboard';
+    } else if (pathPart === 'inventory') {
+      action = 'inventory';
+    } else if (pathPart === 'sources') {
+      action = 'sources';
+    } else if (pathPart.startsWith('sources/')) {
+      if (pathPart.includes('/sheets')) {
+        action = 'sheets';
+      } else if (pathPart.includes('/sync')) {
+        action = 'sync';
+      } else if (pathPart.includes('/activate')) {
+        return { message: 'Source activated', source_id: 'gas_master' } as unknown as T;
+      } else if (pathPart.includes('/archive')) {
+        return { message: 'Source archived' } as unknown as T;
+      } else if (options?.method === 'DELETE') {
+        return { message: 'Source deleted' } as unknown as T;
+      } else {
+        action = 'sources';
+      }
+    } else if (pathPart === 'movements') {
+      action = 'movements';
+    } else if (pathPart === 'sync') {
+      action = 'sync';
+    } else {
+      action = pathPart;
+    }
+
+    params.set('action', action);
+
+    const targetUrl = `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}${params.toString()}`;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 20000);
+
+    try {
+      const response = await fetch(targetUrl, {
+        method: 'GET',
+        signal: controller.signal,
+        redirect: 'follow',
+      });
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        throw new Error(`Google Apps Script returned status ${response.status}`);
+      }
+
+      const json = await response.json();
+      if (json.error) {
+        throw new Error(json.error);
+      }
+      return json as T;
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      console.error('Google Apps Script request error:', err);
+      throw new Error(
+        `Google Apps Script Connection Notice: ${err.message || 'Unable to fetch data'}. Ensure your Web App is deployed with 'Who has access: Anyone'.`
+      );
+    }
+  }
+
   private async request<T>(endpoint: string, options?: RequestInit): Promise<T> {
+    const gasUrl = getAppsScriptUrl();
+    if (gasUrl) {
+      return this.requestAppsScript<T>(endpoint, options, gasUrl);
+    }
+
     const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
     const url = `${API_BASE_URL}${cleanEndpoint}`;
     const method = (options?.method || 'GET').toUpperCase();
