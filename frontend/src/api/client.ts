@@ -186,7 +186,7 @@ class ApiClient {
 
         if (isNetworkErr) {
           const netErr = new Error(
-            `Cannot reach backend (${API_BASE_URL}). If hosted on Render free tier, it may still be waking up or redeploying (takes ~30-60s) — retrying automatically. If this persists, verify VITE_API_BASE_URL in Vercel.`
+            `Google Apps Script not connected. Please enter your Google Apps Script Web App URL in Spreadsheet Sources or set VITE_APPS_SCRIPT_URL in Vercel to sync your Google Sheets.`
           );
           console.error(`API network failure [${endpoint}]:`, error);
           throw netErr;
@@ -275,7 +275,7 @@ class ApiClient {
         }
         if (isNetworkErr) {
           throw new Error(
-            `Cannot reach backend (${API_BASE_URL}). If hosted on Render free tier, the server may be cold-booting or restarting. Please wait ~30 seconds and retry.`
+            `Cannot connect to data source. Ensure your Google Apps Script Web App URL is configured or online.`
           );
         }
         throw err;
