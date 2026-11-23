@@ -32,7 +32,7 @@ const AddSourceModal: React.FC<AddModalProps> = ({ onClose, onAdded }) => {
     spreadsheet_url_or_id: '',
     period: '',
     description: '',
-    is_active: true,
+    is_active: false,
     poll_interval_seconds: 30,
   });
 
@@ -41,7 +41,7 @@ const AddSourceModal: React.FC<AddModalProps> = ({ onClose, onAdded }) => {
   const [uploadName, setUploadName] = useState('');
   const [uploadPeriod, setUploadPeriod] = useState('');
   const [uploadDescription, setUploadDescription] = useState('');
-  const [uploadIsActive, setUploadIsActive] = useState(true);
+  const [uploadIsActive, setUploadIsActive] = useState(false);
   const [uploadProgress, setUploadProgress] = useState('');
 
   const [saving, setSaving] = useState(false);
@@ -119,17 +119,16 @@ const AddSourceModal: React.FC<AddModalProps> = ({ onClose, onAdded }) => {
         const res = await apiClient.uploadSource(fd);
         uploadedCount++;
 
-        // Permanently persist the file and metadata in browser IndexedDB until user explicitly deletes it
+        // Persist metadata in browser IndexedDB
         const sid = res.source?.source_id || `local_${Date.now()}_${i}`;
         await persistentStorage.saveSource({
           id: sid,
-          name: effectiveName,
+          name: res.source?.name || effectiveName,
           source_type: 'excel_upload',
           spreadsheet_url_or_id: res.source?.spreadsheet_id || `local_file:${file.name}`,
           period: uploadPeriod,
           description: uploadDescription,
           is_active: uploadIsActive,
-          file_blob: file, // Store the actual modern Excel workbook binary blob
           file_name: file.name,
           file_size: file.size,
           created_at: new Date().toISOString()
@@ -509,6 +508,16 @@ const SourceCard: React.FC<SourceCardProps> = ({ source, onRefresh, onDelete }) 
     }
   };
 
+  const doDeactivate = async () => {
+    setActionError('');
+    try {
+      await apiClient.deactivateSource(source.source_id);
+      onRefresh();
+    } catch (e: any) {
+      setActionError(e.message || 'Failed to deactivate');
+    }
+  };
+
   const doArchive = async () => {
     if (!confirm(`Archive "${source.name}"? It will remain accessible for historical view.`)) return;
     setActionError('');
@@ -521,10 +530,7 @@ const SourceCard: React.FC<SourceCardProps> = ({ source, onRefresh, onDelete }) 
   };
 
   const doDelete = async () => {
-    const isAct = source.is_active === 1;
-    const msg = isAct
-      ? `Delete active spreadsheet "${source.name}"? Another source will automatically become active.`
-      : `Permanently delete "${source.name}" and all its records? This cannot be undone.`;
+    const msg = `Permanently delete "${source.name}" and all its records? This cannot be undone.`;
     if (!confirm(msg)) return;
     setActionError('');
     try {
@@ -653,6 +659,15 @@ const SourceCard: React.FC<SourceCardProps> = ({ source, onRefresh, onDelete }) 
             <RefreshCw size={13} className={syncing ? 'animate-spin' : ''} />
             {syncing ? 'Syncing...' : 'Sync Now'}
           </button>
+
+          {source.is_active === 1 && (
+            <button
+              onClick={doDeactivate}
+              className="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg bg-slate-100 text-slate-700 hover:bg-slate-200 border border-slate-300"
+            >
+              <X size={13} /> Deactivate
+            </button>
+          )}
 
           {source.is_active !== 1 && source.status !== 'archived' && (
             <button
@@ -789,7 +804,7 @@ export function SpreadsheetSources({ refreshKey }: Props) {
       // STRICT FILTER: NEVER allow any tombstoned / deleted source
       const backendSources = rawBackendSources.filter(s => !persistentStorage.isTombstoned(s.source_id, s.spreadsheet_id));
 
-      // 3. Self-Healing Reconciliation: ONLY for non-tombstoned sources
+      // 3. Self-Healing Reconciliation: ONLY for non-tombstoned Google Sheets
       if (localSources.length > 0) {
         let restoredCount = 0;
         for (const local of localSources) {
@@ -799,31 +814,20 @@ export function SpreadsheetSources({ refreshKey }: Props) {
           const existsOnBackend = backendSources.some(
             b => b.source_id === local.id || 
                  b.spreadsheet_id === local.spreadsheet_url_or_id || 
-                 (b.name === local.name && b.source_type === local.source_type)
+                 (b.name.trim().toLowerCase() === local.name.trim().toLowerCase() && b.source_type === local.source_type)
           );
 
-          if (!existsOnBackend) {
+          if (!existsOnBackend && local.source_type === 'google_sheets' && local.spreadsheet_url_or_id) {
             try {
-              if (local.source_type === 'google_sheets') {
-                await apiClient.createSource({
-                  name: local.name,
-                  spreadsheet_url_or_id: local.spreadsheet_url_or_id,
-                  period: local.period,
-                  description: local.description,
-                  is_active: local.is_active,
-                  poll_interval_seconds: local.poll_interval_seconds || 30,
-                });
-                restoredCount++;
-              } else if (local.source_type === 'excel_upload' && local.file_blob) {
-                const fd = new FormData();
-                fd.append('file', local.file_blob, local.file_name || `${local.name}.xlsx`);
-                fd.append('name', local.name);
-                fd.append('period', local.period || '');
-                fd.append('description', local.description || '');
-                fd.append('is_active', local.is_active ? 'true' : 'false');
-                await apiClient.uploadSource(fd);
-                restoredCount++;
-              }
+              await apiClient.createSource({
+                name: local.name,
+                spreadsheet_url_or_id: local.spreadsheet_url_or_id,
+                period: local.period,
+                description: local.description,
+                is_active: local.is_active,
+                poll_interval_seconds: local.poll_interval_seconds || 30,
+              });
+              restoredCount++;
             } catch (healErr) {
               console.warn('Background source healing notice:', healErr);
             }
@@ -972,22 +976,29 @@ export function SpreadsheetSources({ refreshKey }: Props) {
         ))}
       </div>
 
-      {/* Currently Active Source */}
+      {/* Optional Active Source Banner */}
       {active && (
-        <div className="bg-cyan-50 border border-cyan-200 rounded-2xl p-4 flex items-center justify-between gap-3">
+        <div className="bg-cyan-50/80 border border-cyan-200 rounded-2xl p-4 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <div className="h-3 w-3 rounded-full bg-emerald-500 animate-pulse flex-shrink-0" />
+            <div className="h-3 w-3 rounded-full bg-cyan-600 animate-pulse flex-shrink-0" />
             <div>
-              <p className="text-sm font-bold text-cyan-900">Current Active Source: {active.name}</p>
+              <p className="text-sm font-bold text-cyan-900">Active Source: {active.name}</p>
               <p className="text-xs text-cyan-700">
                 {Number(active.sheets_count) || 0} sheets · {Number(active.products_count) || 0} catalog products · {Number(active.movements_count) || 0} daily transactions
                 {active.period ? ` · Period: ${active.period}` : ''}
               </p>
             </div>
           </div>
-          <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-cyan-600 text-white shadow-xs">
-            Operational Live Master
-          </span>
+          <button
+            onClick={async () => {
+              await apiClient.deactivateSource(active.source_id).catch(() => {});
+              fetchSources();
+            }}
+            className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl bg-white border border-cyan-300 text-cyan-800 hover:bg-cyan-100 shadow-xs transition-colors flex-shrink-0"
+          >
+            <X size={12} />
+            Deactivate Active
+          </button>
         </div>
       )}
 

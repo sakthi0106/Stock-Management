@@ -217,7 +217,7 @@ class SyncManager:
         description: str = "",
         source_type: str = "google_sheets",
         source_id: Optional[str] = None,
-        is_active: bool = True
+        is_active: bool = False
     ) -> InventoryDataStore:
         with self._lock:
             sid = source_id or f"src_{uuid.uuid4().hex[:8]}"
@@ -239,13 +239,15 @@ class SyncManager:
             store.period = period
             store.description = description
 
-            if is_active or not self.active_source_id:
+            if is_active:
                 for s in self.sources.values():
                     s.is_active = 0
                 store.is_active = 1
                 self.active_source_id = sid
             else:
                 store.is_active = 0
+                if self.active_source_id == sid:
+                    self.active_source_id = None
 
             self.sources[sid] = store
             self._dirty_combined = True
@@ -309,18 +311,40 @@ class SyncManager:
             if source_filter == "active":
                 if self.active_source_id and self.active_source_id in self.sources:
                     return self.sources[self.active_source_id]
-                first_id = next(iter(self.sources))
-                return self.sources[first_id]
+                return self.get_combined_store()
 
             return self.sources.get(source_filter)
 
     def activate_source(self, source_id: str) -> bool:
         with self._lock:
-            if source_id not in self.sources:
+            target_sid = source_id
+            if target_sid not in self.sources:
+                for sid, s in self.sources.items():
+                    if s.spreadsheet_id == source_id:
+                        target_sid = sid
+                        break
+            if target_sid not in self.sources:
                 return False
             for sid, store in self.sources.items():
-                store.is_active = 1 if sid == source_id else 0
-            self.active_source_id = source_id
+                store.is_active = 1 if sid == target_sid else 0
+            self.active_source_id = target_sid
+            self._dirty_combined = True
+            self._save_registry()
+            return True
+
+    def deactivate_source(self, source_id: str) -> bool:
+        with self._lock:
+            target_sid = source_id
+            if target_sid not in self.sources:
+                for sid, s in self.sources.items():
+                    if s.spreadsheet_id == source_id:
+                        target_sid = sid
+                        break
+            if target_sid not in self.sources:
+                return False
+            self.sources[target_sid].is_active = 0
+            if self.active_source_id == target_sid:
+                self.active_source_id = None
             self._dirty_combined = True
             self._save_registry()
             return True
@@ -351,7 +375,12 @@ class SyncManager:
             # Clean up local file if it was an uploaded Excel workbook
             if store.source_type == "excel_upload" and store.spreadsheet_id.startswith("local_file:"):
                 fpath = store.spreadsheet_id.split("local_file:", 1)[1]
-                if os.path.exists(fpath):
+                # Only delete the file from disk if NO OTHER registered source is referencing it
+                other_using = any(
+                    s.source_id != target_sid and s.spreadsheet_id == store.spreadsheet_id
+                    for s in self.sources.values()
+                )
+                if not other_using and os.path.exists(fpath):
                     try:
                         os.remove(fpath)
                     except Exception:
@@ -366,9 +395,7 @@ class SyncManager:
                     pass
 
             if self.active_source_id == target_sid:
-                self.active_source_id = next(iter(self.sources)) if self.sources else None
-                if self.active_source_id:
-                    self.sources[self.active_source_id].is_active = 1
+                self.active_source_id = None
 
             self._dirty_combined = True
             self._save_registry()

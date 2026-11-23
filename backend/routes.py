@@ -56,7 +56,7 @@ def create_source():
 
     period = (data.get('period') or '').strip()
     description = (data.get('description') or '').strip()
-    is_active = bool(data.get('is_active', True))
+    is_active = bool(data.get('is_active', False))
 
     store = _sync_manager.register_source(
         name=name,
@@ -94,7 +94,7 @@ def upload_source():
     custom_name = request.form.get('name', '').strip()
     period = request.form.get('period', '').strip()
     description = request.form.get('description', 'Uploaded Excel workbook').strip()
-    set_active = request.form.get('is_active', 'true').lower() in ('true', '1')
+    set_active = request.form.get('is_active', 'false').lower() in ('true', '1')
 
     for idx, file in enumerate(uploaded_files):
         if not file or not file.filename:
@@ -109,15 +109,21 @@ def upload_source():
                 }), 400
             return jsonify({"error": f"'{filename}' is not an Excel workbook. Only .xlsx files are supported."}), 400
 
-        timestamp = int(datetime.now().timestamp())
-        save_path = os.path.join(Config.UPLOAD_FOLDER, f"{timestamp}_{idx}_{filename}")
-        file.save(save_path)
-
         # If uploading multiple files together, name each according to its filename
         if len(uploaded_files) > 1 or not custom_name:
             source_name = filename.rsplit('.', 1)[0]
         else:
             source_name = custom_name
+
+        # Clean up any existing duplicate source with the same name before registering the new one
+        for sid, s in list(_sync_manager.sources.items()):
+            if s.source_type == "excel_upload" and s.name.strip().lower() == source_name.strip().lower():
+                logger.info(f"Replacing existing source '{s.name}' ({sid}) with updated upload.")
+                _sync_manager.delete_source(sid)
+
+        timestamp = int(datetime.now().timestamp())
+        save_path = os.path.join(Config.UPLOAD_FOLDER, f"{timestamp}_{idx}_{filename}")
+        file.save(save_path)
 
         try:
             extracted = reader.extract_from_excel(save_path)
@@ -198,6 +204,14 @@ def activate_source(source_id: str):
     if not ok:
         return jsonify({"error": "Source not found"}), 404
     return jsonify({"message": "Source activated", "source_id": source_id})
+
+
+@api_bp.route('/sources/<source_id>/deactivate', methods=['POST'])
+def deactivate_source(source_id: str):
+    ok = _sync_manager.deactivate_source(source_id)
+    if not ok:
+        return jsonify({"error": "Source not found"}), 404
+    return jsonify({"message": "Source deactivated", "source_id": source_id})
 
 
 @api_bp.route('/sources/<source_id>/archive', methods=['POST'])

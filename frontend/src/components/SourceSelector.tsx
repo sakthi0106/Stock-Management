@@ -37,11 +37,13 @@ export const SourceSelector: React.FC<SourceSelectorProps> = ({ value, onChange,
           disabled={loading}
           className="appearance-none bg-white border border-slate-200 rounded-lg text-sm text-slate-700 font-medium pl-3 pr-8 py-1.5 cursor-pointer hover:border-cyan-400 focus:outline-none focus:ring-2 focus:ring-cyan-300 transition-colors"
         >
-          <option value="active">Active Source</option>
           <option value="all">All Sources (Combined)</option>
+          {sources.some(s => s.is_active === 1) && (
+            <option value="active">Active Source</option>
+          )}
           {sources.map(src => (
             <option key={src.source_id} value={src.source_id}>
-              {src.name}{src.status === 'archived' ? ' (archived)' : ''}
+              {src.name}{src.is_active === 1 ? ' (Active)' : ''}{src.status === 'archived' ? ' (archived)' : ''}
             </option>
           ))}
         </select>

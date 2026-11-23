@@ -195,6 +195,10 @@ class ApiClient {
     return this.request(`/sources/${encodeURIComponent(sourceId)}/activate`, { method: 'POST' });
   }
 
+  async deactivateSource(sourceId: string): Promise<{ message: string; source_id: string }> {
+    return this.request(`/sources/${encodeURIComponent(sourceId)}/deactivate`, { method: 'POST' });
+  }
+
   async archiveSource(sourceId: string): Promise<{ message: string }> {
     return this.request(`/sources/${encodeURIComponent(sourceId)}/archive`, { method: 'POST' });
   }

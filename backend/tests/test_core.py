@@ -180,3 +180,41 @@ def test_delete_source_and_tombstones():
 
     # Deleting again is idempotent and returns True
     assert sm.delete_source(sid) is True
+
+
+def test_active_source_not_mandatory_and_deactivate():
+    sm = SyncManager()
+    sm.sources.clear()
+    sm.active_source_id = None
+
+    # Register source with is_active=False
+    s1 = sm.register_source(name="Source 1", spreadsheet_url_or_id="sheet_1", is_active=False)
+    assert s1.is_active == 0
+    assert sm.active_source_id is None
+
+    # Register second source also inactive
+    s2 = sm.register_source(name="Source 2", spreadsheet_url_or_id="sheet_2", is_active=False)
+    assert s2.is_active == 0
+    assert sm.active_source_id is None
+
+    # get_store("active") returns combined store when no source is active
+    store = sm.get_store("active")
+    assert store is not None
+    assert store.source_id == "all"
+
+    # Activate s1
+    assert sm.activate_source(s1.source_id) is True
+    assert s1.is_active == 1
+    assert sm.active_source_id == s1.source_id
+
+    # Deactivate s1
+    assert sm.deactivate_source(s1.source_id) is True
+    assert s1.is_active == 0
+    assert sm.active_source_id is None
+
+    # Activating then deleting active source does NOT force another source active
+    sm.activate_source(s2.source_id)
+    assert sm.active_source_id == s2.source_id
+    sm.delete_source(s2.source_id)
+    assert sm.active_source_id is None
+    assert s1.is_active == 0

@@ -19,7 +19,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onNavigateToInventory,
   onNavigateToMovements,
   refreshKey,
-  selectedSource = 'active',
+  selectedSource = 'all',
   onSourceChange,
 }) => {
   const [data, setData] = useState<DashboardKPI | null>(null);

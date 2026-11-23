@@ -20,7 +20,7 @@ export const Inventory: React.FC<InventoryPageProps> = ({
   initialStatusFilter,
   globalSearch,
   refreshKey,
-  selectedSource = 'active',
+  selectedSource = 'all',
   onSourceChange,
 }) => {
   const [viewMode, setViewMode] = useState<'table' | 'cards'>('table');

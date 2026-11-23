@@ -13,7 +13,7 @@ interface MovementsProps {
 
 export const Movements: React.FC<MovementsProps> = ({
   refreshKey,
-  selectedSource = 'active',
+  selectedSource = 'all',
   onSourceChange,
 }) => {
   const [movements, setMovements] = useState<Movement[]>([]);
