@@ -173,25 +173,18 @@ class PersistentStorage {
 
   async deleteSource(id: string, spreadsheetId?: string): Promise<void> {
     // 1. Permanently record in tombstones
-    this.addTombstone(id, spreadsheetId);
+    this.addTombstone(id);
+    if (spreadsheetId) {
+      this.addTombstone(spreadsheetId);
+    }
 
     // 2. Delete from IndexedDB STORE_SOURCES
     try {
       const db = await this.getDB();
-      const sources = await this.getAllSources();
-      const toDelete = sources.filter(
-        s => s.id === id || s.id === spreadsheetId ||
-             (spreadsheetId && s.spreadsheet_url_or_id === spreadsheetId) ||
-             s.spreadsheet_url_or_id === id
-      );
-
       const tx = db.transaction(STORE_SOURCES, 'readwrite');
       const store = tx.objectStore(STORE_SOURCES);
       store.delete(id);
       if (spreadsheetId) store.delete(spreadsheetId);
-      for (const td of toDelete) {
-        store.delete(td.id);
-      }
       await new Promise<void>((resolve) => {
         tx.oncomplete = () => resolve();
         tx.onerror = () => resolve();
@@ -204,9 +197,7 @@ class PersistentStorage {
     try {
       const existing = this.getLocalStorageSources();
       const filtered = existing.filter(
-        s => s.id !== id && s.id !== spreadsheetId &&
-             s.spreadsheet_url_or_id !== id &&
-             (!spreadsheetId || s.spreadsheet_url_or_id !== spreadsheetId)
+        s => s.id !== id && (!spreadsheetId || s.spreadsheet_url_or_id !== spreadsheetId)
       );
       localStorage.setItem('stock_mgmt_stored_sources', JSON.stringify(filtered));
     } catch {
@@ -218,9 +209,7 @@ class PersistentStorage {
       const cached = await this.getSnapshot<any[]>('sources_list');
       if (Array.isArray(cached)) {
         const cleaned = cached.filter(
-          s => s.source_id !== id && s.source_id !== spreadsheetId &&
-               s.spreadsheet_id !== id &&
-               (!spreadsheetId || s.spreadsheet_id !== spreadsheetId)
+          s => s.source_id !== id && (!spreadsheetId || s.spreadsheet_id !== spreadsheetId)
         );
         await this.saveSnapshot('sources_list', cleaned);
       }

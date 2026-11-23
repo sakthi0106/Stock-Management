@@ -125,6 +125,18 @@ class SyncManager:
                 with open(reg_path, 'r', encoding='utf-8') as f:
                     records = json.load(f)
 
+                # Deduplicate records by spreadsheet_id, favoring the one with parsed data
+                deduped = {}
+                for r in records:
+                    sheet_id = r.get("spreadsheet_id", "")
+                    if sheet_id in deduped:
+                        prev = deduped[sheet_id]
+                        if r.get("sheets_count", 0) > prev.get("sheets_count", 0) or r.get("items_count", 0) > prev.get("items_count", 0):
+                            deduped[sheet_id] = r
+                    else:
+                        deduped[sheet_id] = r
+                records = list(deduped.values())
+
                 reader = UniversalSpreadsheetReader()
                 for r in records:
                     sid = r.get("source_id")
@@ -229,6 +241,24 @@ class SyncManager:
             if clean_sheet_id in self.deleted_source_ids:
                 self.deleted_source_ids.discard(clean_sheet_id)
             self._save_deleted()
+
+            # Deduplication: If a source with the exact same clean_sheet_id already exists in self.sources
+            for existing_sid, existing_store in self.sources.items():
+                if existing_store.spreadsheet_id == clean_sheet_id and (source_id is None or source_id == existing_sid):
+                    if name and name not in ("Google Sheet", "Google Sheet Live", "Untitled Source"):
+                        existing_store.name = name
+                    if period:
+                        existing_store.period = period
+                    if description:
+                        existing_store.description = description
+                    if is_active:
+                        for s in self.sources.values():
+                            s.is_active = 0
+                        existing_store.is_active = 1
+                        self.active_source_id = existing_sid
+                    self._dirty_combined = True
+                    self._save_registry()
+                    return existing_store
 
             store = InventoryDataStore(
                 source_id=sid,
@@ -368,7 +398,9 @@ class SyncManager:
 
             store = self.sources.pop(target_sid)
             self.deleted_source_ids.add(target_sid)
-            if store.spreadsheet_id:
+            # CRITICAL: ONLY tombstone spreadsheet_id if NO OTHER registered source is using it
+            other_has_sheet = any(s.spreadsheet_id == store.spreadsheet_id for s in self.sources.values())
+            if not other_has_sheet and store.spreadsheet_id:
                 self.deleted_source_ids.add(store.spreadsheet_id)
             self._save_deleted()
 

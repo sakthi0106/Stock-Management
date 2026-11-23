@@ -218,3 +218,30 @@ def test_active_source_not_mandatory_and_deactivate():
     sm.delete_source(s2.source_id)
     assert sm.active_source_id is None
     assert s1.is_active == 0
+
+
+def test_register_source_deduplication_and_isolated_delete():
+    sm = SyncManager()
+    sm.sources.clear()
+    sm.active_source_id = None
+
+    # Register initial sheet
+    s1 = sm.register_source(name="Stock_Data", spreadsheet_url_or_id="https://docs.google.com/spreadsheets/d/abc123sheet/edit")
+    assert len(sm.sources) == 1
+    sid1 = s1.source_id
+
+    # Registering the same spreadsheet again updates s1 and does NOT create a second source
+    s2 = sm.register_source(name="Stock data", spreadsheet_url_or_id="abc123sheet", period="2026-10")
+    assert len(sm.sources) == 1
+    assert s2.source_id == sid1
+    assert s2.period == "2026-10"
+
+    # Register a different sheet
+    s3 = sm.register_source(name="Different Sheet", spreadsheet_url_or_id="diff_sheet_456")
+    assert len(sm.sources) == 2
+
+    # Deleting s3 only deletes s3, and does not affect s1/s2
+    sm.delete_source(s3.source_id)
+    assert len(sm.sources) == 1
+    assert sid1 in sm.sources
+    assert s3.source_id not in sm.sources

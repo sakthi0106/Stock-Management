@@ -537,7 +537,7 @@ const SourceCard: React.FC<SourceCardProps> = ({ source, onRefresh, onDelete }) 
       if (onDelete) {
         onDelete(source);
       } else {
-        await persistentStorage.deleteSource(source.source_id, source.spreadsheet_id);
+        await persistentStorage.deleteSource(source.source_id);
         await apiClient.deleteSource(source.source_id).catch(() => {});
         onRefresh();
       }
@@ -804,50 +804,29 @@ export function SpreadsheetSources({ refreshKey }: Props) {
       // STRICT FILTER: NEVER allow any tombstoned / deleted source
       const backendSources = rawBackendSources.filter(s => !persistentStorage.isTombstoned(s.source_id, s.spreadsheet_id));
 
-      // 3. Self-Healing Reconciliation: ONLY for non-tombstoned Google Sheets
-      if (localSources.length > 0) {
-        let restoredCount = 0;
-        for (const local of localSources) {
-          if (persistentStorage.isTombstoned(local.id, local.spreadsheet_url_or_id)) {
-            continue;
+      // 3. Deduplicate sources sharing the exact same spreadsheet_id (keeping the populated / active one)
+      const seen = new Map<string, SpreadsheetSource>();
+      for (const s of backendSources) {
+        const key = s.spreadsheet_id || s.source_id;
+        if (!seen.has(key)) {
+          seen.set(key, s);
+        } else {
+          const prev = seen.get(key)!;
+          // Keep the one with actual sheets, products, or movements
+          const sScore = (Number(s.sheets_count) || 0) + (Number(s.products_count) || 0) + (s.is_active === 1 ? 1000 : 0);
+          const prevScore = (Number(prev.sheets_count) || 0) + (Number(prev.products_count) || 0) + (prev.is_active === 1 ? 1000 : 0);
+          if (sScore > prevScore) {
+            seen.set(key, s);
           }
-          const existsOnBackend = backendSources.some(
-            b => b.source_id === local.id || 
-                 b.spreadsheet_id === local.spreadsheet_url_or_id || 
-                 (b.name.trim().toLowerCase() === local.name.trim().toLowerCase() && b.source_type === local.source_type)
-          );
-
-          if (!existsOnBackend && local.source_type === 'google_sheets' && local.spreadsheet_url_or_id) {
-            try {
-              await apiClient.createSource({
-                name: local.name,
-                spreadsheet_url_or_id: local.spreadsheet_url_or_id,
-                period: local.period,
-                description: local.description,
-                is_active: local.is_active,
-                poll_interval_seconds: local.poll_interval_seconds || 30,
-              });
-              restoredCount++;
-            } catch (healErr) {
-              console.warn('Background source healing notice:', healErr);
-            }
-          }
-        }
-
-        if (restoredCount > 0) {
-          const fresh = await apiClient.getSources(true);
-          const freshValid = (fresh.sources || []).filter(s => !persistentStorage.isTombstoned(s.source_id, s.spreadsheet_id));
-          setSources(freshValid);
-          await persistentStorage.saveSnapshot('sources_list', freshValid);
-          return;
         }
       }
+      const dedupedSources = Array.from(seen.values());
 
-      setSources(backendSources);
-      await persistentStorage.saveSnapshot('sources_list', backendSources);
+      setSources(dedupedSources);
+      await persistentStorage.saveSnapshot('sources_list', dedupedSources);
 
-      // Cache all live backend Google Sheets into persistent storage
-      for (const s of backendSources) {
+      // Cache live backend Google Sheets into persistent storage
+      for (const s of dedupedSources) {
         if (s.source_type === 'google_sheets' && !persistentStorage.isTombstoned(s.source_id, s.spreadsheet_id)) {
           persistentStorage.saveSource({
             id: s.source_id,
@@ -876,18 +855,24 @@ export function SpreadsheetSources({ refreshKey }: Props) {
   }, []);
 
   const handleDeleteSource = async (sourceToDelete: SpreadsheetSource) => {
-    // 1. Optimistic removal from state immediately
-    setSources(prev => prev.filter(
-      s => s.source_id !== sourceToDelete.source_id &&
-           s.spreadsheet_id !== sourceToDelete.spreadsheet_id
-    ));
-    // 2. Add to tombstones & delete from IndexedDB & snapshots
-    await persistentStorage.deleteSource(sourceToDelete.source_id, sourceToDelete.spreadsheet_id);
-    // 3. Best-effort notify backend API
+    // 1. Optimistic removal from state: ONLY remove the specific clicked source_id
+    setSources(prev => prev.filter(s => s.source_id !== sourceToDelete.source_id));
+
+    // 2. Only tombstone spreadsheet_id if no other source shares it
+    const otherSharesSheet = sources.some(
+      s => s.source_id !== sourceToDelete.source_id && s.spreadsheet_id === sourceToDelete.spreadsheet_id
+    );
+    const tombstoneSheetId = otherSharesSheet ? undefined : sourceToDelete.spreadsheet_id;
+
+    // 3. Delete from IndexedDB & snapshots
+    await persistentStorage.deleteSource(sourceToDelete.source_id, tombstoneSheetId);
+
+    // 4. Delete from backend API
     await apiClient.deleteSource(sourceToDelete.source_id).catch(err => {
       console.warn('Backend deletion notice:', err);
     });
-    // 4. Reload
+
+    // 5. Reload
     fetchSources();
   };
 

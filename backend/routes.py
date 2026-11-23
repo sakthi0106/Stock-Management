@@ -67,9 +67,9 @@ def create_source():
         is_active=is_active
     )
 
-    # Trigger sync in background so Render cold-boot / large sheet fetch never triggers a 502/75s browser timeout;
-    # frontend polls /sources and /sync/status automatically.
-    threading.Thread(target=_sync_manager.sync_source, args=(store.source_id, True), daemon=True).start()
+    # Trigger sync in background if new or not yet populated
+    if not store.worksheets:
+        threading.Thread(target=_sync_manager.sync_source, args=(store.source_id, True), daemon=True).start()
 
     return jsonify({
         "source": store.to_source_dict(),
