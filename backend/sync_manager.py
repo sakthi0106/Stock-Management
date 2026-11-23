@@ -34,33 +34,8 @@ class SyncManager:
         self._cached_combined: Optional[InventoryDataStore] = None
         self._dirty_combined: bool = True
 
-        # Track explicitly deleted source tombstones to prevent cold-boot resurrection
-        self.deleted_source_ids: Set[str] = set()
-        self._load_deleted()
-
         # Restore all previously registered sources permanently from disk
         self._load_registry()
-
-    def _get_deleted_path(self) -> str:
-        os.makedirs(Config.UPLOAD_FOLDER, exist_ok=True)
-        return os.path.join(Config.UPLOAD_FOLDER, "deleted_sources.json")
-
-    def _load_deleted(self):
-        try:
-            dpath = self._get_deleted_path()
-            if os.path.exists(dpath):
-                with open(dpath, 'r', encoding='utf-8') as f:
-                    self.deleted_source_ids = set(json.load(f))
-        except Exception as e:
-            logger.warning(f"Could not load deleted sources tombstones: {e}")
-
-    def _save_deleted(self):
-        try:
-            dpath = self._get_deleted_path()
-            with open(dpath, 'w', encoding='utf-8') as f:
-                json.dump(list(self.deleted_source_ids), f)
-        except Exception as e:
-            logger.warning(f"Could not save deleted sources tombstones: {e}")
 
     def _get_registry_path(self) -> str:
         os.makedirs(Config.UPLOAD_FOLDER, exist_ok=True)
@@ -128,9 +103,6 @@ class SyncManager:
                 reader = UniversalSpreadsheetReader()
                 for r in records:
                     sid = r.get("source_id")
-                    sheet_id = r.get("spreadsheet_id", "")
-                    if sid in self.deleted_source_ids or sheet_id in self.deleted_source_ids:
-                        continue
                     stype = r.get("source_type", "google_sheets")
                     name = r.get("name", "Restored Source")
                     period = r.get("period", "")
@@ -200,7 +172,7 @@ class SyncManager:
         # Auto-register environment variable source if configured and no source with that ID exists
         if Config.GOOGLE_SHEETS_SPREADSHEET_ID:
             clean_env_id = extract_spreadsheet_id(Config.GOOGLE_SHEETS_SPREADSHEET_ID)
-            if clean_env_id and clean_env_id not in self.deleted_source_ids and not any(s.spreadsheet_id == clean_env_id for s in self.sources.values()):
+            if clean_env_id and not any(s.spreadsheet_id == clean_env_id for s in self.sources.values()):
                 self.register_source(
                     name="Google Sheet Live",
                     spreadsheet_url_or_id=clean_env_id,
@@ -222,14 +194,6 @@ class SyncManager:
         with self._lock:
             sid = source_id or f"src_{uuid.uuid4().hex[:8]}"
             clean_sheet_id = spreadsheet_url_or_id if source_type == "excel_upload" else extract_spreadsheet_id(spreadsheet_url_or_id)
-
-            # If user explicitly registers anew, remove any past deletion tombstones
-            if sid in self.deleted_source_ids:
-                self.deleted_source_ids.discard(sid)
-            if clean_sheet_id in self.deleted_source_ids:
-                self.deleted_source_ids.discard(clean_sheet_id)
-            self._save_deleted()
-
             store = InventoryDataStore(
                 source_id=sid,
                 name=name,
@@ -327,26 +291,9 @@ class SyncManager:
 
     def delete_source(self, source_id: str) -> bool:
         with self._lock:
-            # Match by source_id or spreadsheet_id
-            target_sid = source_id
-            if target_sid not in self.sources:
-                for sid, s in self.sources.items():
-                    if s.spreadsheet_id == source_id:
-                        target_sid = sid
-                        break
-
-            # Always record deletion tombstone so it cannot return on cold boot or restart
-            self.deleted_source_ids.add(source_id)
-
-            if target_sid not in self.sources:
-                self._save_deleted()
-                return True
-
-            store = self.sources.pop(target_sid)
-            self.deleted_source_ids.add(target_sid)
-            if store.spreadsheet_id:
-                self.deleted_source_ids.add(store.spreadsheet_id)
-            self._save_deleted()
+            if source_id not in self.sources:
+                return False
+            store = self.sources.pop(source_id)
 
             # Clean up local file if it was an uploaded Excel workbook
             if store.source_type == "excel_upload" and store.spreadsheet_id.startswith("local_file:"):
@@ -358,14 +305,14 @@ class SyncManager:
                         pass
 
             # Clean up persistent cache file
-            cache_path = self._get_cache_path(target_sid)
+            cache_path = self._get_cache_path(source_id)
             if os.path.exists(cache_path):
                 try:
                     os.remove(cache_path)
                 except Exception:
                     pass
 
-            if self.active_source_id == target_sid:
+            if self.active_source_id == source_id:
                 self.active_source_id = next(iter(self.sources)) if self.sources else None
                 if self.active_source_id:
                     self.sources[self.active_source_id].is_active = 1

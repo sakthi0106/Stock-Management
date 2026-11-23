@@ -2,9 +2,9 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   Database, Plus, RefreshCw, Archive, Trash2, CheckCircle2, AlertCircle,
   Clock, Layers, TrendingUp, ChevronDown, ChevronUp, ExternalLink, X,
-  Copy, Check, Upload, FileSpreadsheet, ShieldAlert, Zap, Globe
+  Copy, Check, Upload, FileSpreadsheet, ShieldAlert
 } from 'lucide-react';
-import { apiClient, getAppsScriptUrl, setAppsScriptUrl } from '../api/client';
+import { apiClient } from '../api/client';
 import { SpreadsheetSource, SheetInfo } from '../types';
 import { persistentStorage } from '../utils/persistentStorage';
 
@@ -448,7 +448,6 @@ const AddSourceModal: React.FC<AddModalProps> = ({ onClose, onAdded }) => {
 interface SourceCardProps {
   source: SpreadsheetSource;
   onRefresh: () => void;
-  onDelete?: (source: SpreadsheetSource) => void;
 }
 
 const statusBadge = (status: string) => {
@@ -464,7 +463,7 @@ const syncBadge = (s: string) => {
   return 'text-slate-400';
 };
 
-const SourceCard: React.FC<SourceCardProps> = ({ source, onRefresh, onDelete }) => {
+const SourceCard: React.FC<SourceCardProps> = ({ source, onRefresh }) => {
   const [expanded, setExpanded] = useState(false);
   const [sheets, setSheets] = useState<SheetInfo[]>([]);
   const [syncing, setSyncing] = useState(false);
@@ -528,13 +527,9 @@ const SourceCard: React.FC<SourceCardProps> = ({ source, onRefresh, onDelete }) 
     if (!confirm(msg)) return;
     setActionError('');
     try {
-      if (onDelete) {
-        onDelete(source);
-      } else {
-        await persistentStorage.deleteSource(source.source_id, source.spreadsheet_id);
-        await apiClient.deleteSource(source.source_id).catch(() => {});
-        onRefresh();
-      }
+      await apiClient.deleteSource(source.source_id).catch(() => {});
+      await persistentStorage.deleteSource(source.source_id);
+      onRefresh();
     } catch (e: any) {
       setActionError(e.message || 'Failed to delete');
     }
@@ -771,13 +766,6 @@ export function SpreadsheetSources({ refreshKey }: Props) {
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
 
-  // Google Apps Script state
-  const [gasUrl, setGasUrl] = useState<string>(getAppsScriptUrl());
-  const [gasInput, setGasInput] = useState<string>(getAppsScriptUrl());
-  const [gasConnecting, setGasConnecting] = useState(false);
-  const [gasSuccess, setGasSuccess] = useState('');
-  const [showGasGuide, setShowGasGuide] = useState(false);
-
   const fetchSources = useCallback(async () => {
     setLoading(true);
     setError('');
@@ -786,23 +774,17 @@ export function SpreadsheetSources({ refreshKey }: Props) {
       const localSources = await persistentStorage.getAllSources();
       const cachedSnapshot = await persistentStorage.getSnapshot<SpreadsheetSource[]>('sources_list');
       if (cachedSnapshot && cachedSnapshot.length > 0) {
-        const validCached = cachedSnapshot.filter(s => !persistentStorage.isTombstoned(s.source_id, s.spreadsheet_id));
-        setSources(validCached);
+        setSources(cachedSnapshot);
       }
 
-      // 2. Fetch live sources from backend (or Google Apps Script)
+      // 2. Fetch live sources from backend
       const res = await apiClient.getSources(true);
-      const rawBackendSources = res.sources || [];
-      // STRICT FILTER: NEVER allow any tombstoned / deleted source
-      const backendSources = rawBackendSources.filter(s => !persistentStorage.isTombstoned(s.source_id, s.spreadsheet_id));
+      const backendSources = res.sources || [];
 
-      // 3. Self-Healing Reconciliation: ONLY for non-tombstoned sources and not in Apps Script mode
-      if (localSources.length > 0 && !apiClient.isAppsScriptMode()) {
+      // 3. Self-Healing Reconciliation: If Render restarted and lost ephemeral sources, restore them
+      if (localSources.length > 0) {
         let restoredCount = 0;
         for (const local of localSources) {
-          if (persistentStorage.isTombstoned(local.id, local.spreadsheet_url_or_id)) {
-            continue;
-          }
           const existsOnBackend = backendSources.some(
             b => b.source_id === local.id || 
                  b.spreadsheet_id === local.spreadsheet_url_or_id || 
@@ -839,9 +821,8 @@ export function SpreadsheetSources({ refreshKey }: Props) {
 
         if (restoredCount > 0) {
           const fresh = await apiClient.getSources(true);
-          const freshValid = (fresh.sources || []).filter(s => !persistentStorage.isTombstoned(s.source_id, s.spreadsheet_id));
-          setSources(freshValid);
-          await persistentStorage.saveSnapshot('sources_list', freshValid);
+          setSources(fresh.sources || []);
+          await persistentStorage.saveSnapshot('sources_list', fresh.sources || []);
           return;
         }
       }
@@ -851,7 +832,7 @@ export function SpreadsheetSources({ refreshKey }: Props) {
 
       // Cache all live backend Google Sheets into persistent storage
       for (const s of backendSources) {
-        if (s.source_type === 'google_sheets' && !persistentStorage.isTombstoned(s.source_id, s.spreadsheet_id)) {
+        if (s.source_type === 'google_sheets') {
           persistentStorage.saveSource({
             id: s.source_id,
             name: s.name,
@@ -868,8 +849,7 @@ export function SpreadsheetSources({ refreshKey }: Props) {
     } catch (e: any) {
       const cached = await persistentStorage.getSnapshot<SpreadsheetSource[]>('sources_list');
       if (cached && cached.length > 0) {
-        const validCached = cached.filter(s => !persistentStorage.isTombstoned(s.source_id, s.spreadsheet_id));
-        setSources(validCached);
+        setSources(cached);
       } else {
         setError(e.message || 'Failed to load sources');
       }
@@ -877,69 +857,6 @@ export function SpreadsheetSources({ refreshKey }: Props) {
       setLoading(false);
     }
   }, []);
-
-  const handleDeleteSource = async (sourceToDelete: SpreadsheetSource) => {
-    // 1. Optimistic removal from state immediately
-    setSources(prev => prev.filter(
-      s => s.source_id !== sourceToDelete.source_id &&
-           s.spreadsheet_id !== sourceToDelete.spreadsheet_id
-    ));
-    // 2. Add to tombstones & delete from IndexedDB & snapshots
-    await persistentStorage.deleteSource(sourceToDelete.source_id, sourceToDelete.spreadsheet_id);
-    // 3. Best-effort notify backend API
-    await apiClient.deleteSource(sourceToDelete.source_id).catch(err => {
-      console.warn('Backend deletion notice:', err);
-    });
-    // 4. Reload
-    fetchSources();
-  };
-
-  const handleConnectGas = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const trimmed = gasInput.trim();
-    if (!trimmed) {
-      setAppsScriptUrl('');
-      setGasUrl('');
-      setGasSuccess('Switched back to standard backend.');
-      setTimeout(() => setGasSuccess(''), 3000);
-      fetchSources();
-      return;
-    }
-    if (!trimmed.startsWith('https://script.google.com/macros/s/')) {
-      alert('Please enter a valid Google Apps Script Web App URL (starts with https://script.google.com/macros/s/...)');
-      return;
-    }
-    setGasConnecting(true);
-    try {
-      const res = await fetch(`${trimmed}${trimmed.includes('?') ? '&' : '?'}action=health`, { redirect: 'follow' });
-      const json = await res.json();
-      if (json.status === 'ok') {
-        setAppsScriptUrl(trimmed);
-        setGasUrl(trimmed);
-        setGasSuccess('Connected to Google Apps Script Web App in real-time!');
-        setTimeout(() => setGasSuccess(''), 4000);
-        fetchSources();
-      } else {
-        throw new Error(json.error || 'Invalid response from Google Apps Script');
-      }
-    } catch (err: any) {
-      alert(`Connection check notice: ${err.message}. Make sure your Web App is deployed with "Who has access: Anyone".`);
-      setAppsScriptUrl(trimmed);
-      setGasUrl(trimmed);
-      fetchSources();
-    } finally {
-      setGasConnecting(false);
-    }
-  };
-
-  const handleDisconnectGas = () => {
-    if (confirm('Disconnect Google Apps Script and switch back to Render / Standard API?')) {
-      setAppsScriptUrl('');
-      setGasUrl('');
-      setGasInput('');
-      fetchSources();
-    }
-  };
 
   useEffect(() => {
     fetchSources();
@@ -966,7 +883,7 @@ export function SpreadsheetSources({ refreshKey }: Props) {
               <h1 className="text-lg font-bold">Multi-Spreadsheet Stock Sources</h1>
             </div>
             <p className="text-xs text-slate-300 mt-1 max-w-2xl leading-relaxed">
-              Connect multiple Google Spreadsheets or upload direct Excel workbooks (.xlsx). To connect any Google Spreadsheet via service account, share it with:
+              Connect multiple Google Spreadsheets or upload direct Excel workbooks (.xlsx). To connect any Google Spreadsheet, share it with your system service account email:
             </p>
           </div>
           <div className="flex items-center gap-2 bg-slate-800/90 border border-slate-700/80 px-3 py-2 rounded-xl text-xs font-mono">
@@ -980,98 +897,6 @@ export function SpreadsheetSources({ refreshKey }: Props) {
             </button>
           </div>
         </div>
-      </div>
-
-      {/* Google Apps Script Direct Connector (Zero Cold Boot, 100% Free) */}
-      <div className={`rounded-2xl border p-5 shadow-sm transition-all ${gasUrl ? 'bg-emerald-50/80 border-emerald-300' : 'bg-slate-900 border-slate-800 text-white'}`}>
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2">
-              <Zap className={gasUrl ? 'text-emerald-600' : 'text-amber-400'} size={20} />
-              <h3 className={`text-sm font-bold ${gasUrl ? 'text-emerald-950' : 'text-white'}`}>
-                {gasUrl ? '⚡ Connected via Google Apps Script (Zero Cold-Boot & Real-time)' : '⚡ Connect via Google Apps Script (Recommended — 100% Free & Zero Cold Boots)'}
-              </h3>
-              <span className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded-full ${gasUrl ? 'bg-emerald-200 text-emerald-800' : 'bg-amber-400/20 text-amber-300'}`}>
-                {gasUrl ? 'Active Master' : 'Zero Cold-Boot Mode'}
-              </span>
-            </div>
-            <p className={`text-xs ${gasUrl ? 'text-emerald-800' : 'text-slate-300'} max-w-2xl leading-relaxed`}>
-              {gasUrl 
-                ? 'Your inventory dashboard is reading directly from Google Sheets via your deployed Web App script. Zero server sleeps, zero cold boots, zero 503 errors!'
-                : 'Eliminate Render cold-boot delays and 512MB RAM caps completely by connecting your Google Sheet directly through a free Google Apps Script Web App.'
-              }
-            </p>
-          </div>
-
-          <div className="flex items-center gap-2 flex-wrap">
-            <button
-              onClick={() => setShowGasGuide(v => !v)}
-              className={`text-xs font-semibold px-3 py-1.5 rounded-xl border flex items-center gap-1.5 transition-colors ${
-                gasUrl 
-                  ? 'border-emerald-300 bg-white text-emerald-800 hover:bg-emerald-100' 
-                  : 'border-slate-700 bg-slate-800 text-slate-200 hover:bg-slate-700'
-              }`}
-            >
-              <span>{showGasGuide ? 'Hide Setup Guide' : 'How to Setup (1 min)'}</span>
-              {showGasGuide ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-            </button>
-            {gasUrl && (
-              <button
-                onClick={handleDisconnectGas}
-                className="text-xs font-semibold px-3 py-1.5 rounded-xl bg-red-100 text-red-700 hover:bg-red-200 transition-colors"
-              >
-                Disconnect
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* URL Input Form */}
-        <form onSubmit={handleConnectGas} className="mt-4 pt-4 border-t border-slate-700/60 flex flex-col sm:flex-row gap-2">
-          <input
-            type="text"
-            value={gasInput}
-            onChange={(e) => setGasInput(e.target.value)}
-            placeholder="Paste your Web App URL (https://script.google.com/macros/s/.../exec)"
-            className={`flex-1 px-3.5 py-2 text-xs rounded-xl border focus:outline-hidden font-mono ${
-              gasUrl 
-                ? 'bg-white border-emerald-300 text-emerald-950 placeholder-emerald-400 focus:border-emerald-500' 
-                : 'bg-slate-800 border-slate-700 text-white placeholder-slate-400 focus:border-cyan-500'
-            }`}
-          />
-          <button
-            type="submit"
-            disabled={gasConnecting}
-            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 transition-all flex-shrink-0 shadow-sm"
-          >
-            {gasConnecting ? <RefreshCw size={13} className="animate-spin" /> : <Zap size={13} />}
-            {gasUrl ? 'Update URL' : 'Connect Apps Script'}
-          </button>
-        </form>
-
-        {gasSuccess && (
-          <div className="mt-2 text-xs text-emerald-600 font-semibold flex items-center gap-1.5">
-            <CheckCircle2 size={14} />
-            <span>{gasSuccess}</span>
-          </div>
-        )}
-
-        {/* Expandable Guide */}
-        {showGasGuide && (
-          <div className="mt-4 pt-4 border-t border-slate-700/60 text-xs space-y-3">
-            <div className="bg-slate-800/80 rounded-xl p-4 space-y-2.5 text-slate-200">
-              <p className="font-bold text-amber-300 text-sm">3 Steps to Deploy in Google Sheets (Free Forever):</p>
-              <ol className="list-decimal list-inside space-y-1.5 text-slate-300 leading-relaxed">
-                <li>Open your Google Sheet &gt; In the top menu click <strong className="text-white">Extensions &gt; Apps Script</strong>.</li>
-                <li>Delete everything inside <code className="bg-slate-900 px-1.5 py-0.5 rounded text-cyan-300">Code.gs</code>, paste the code from <code className="bg-slate-900 px-1.5 py-0.5 rounded text-cyan-300">GoogleAppsScript_Backend.js</code>, and click Save.</li>
-                <li>Click <strong className="text-white">Deploy &gt; New deployment</strong> &gt; Select <strong className="text-white">Web app</strong> &gt; Set <em>Execute as: Me</em> and <strong className="text-amber-300">Who has access: Anyone</strong> &gt; Deploy!</li>
-              </ol>
-              <p className="text-[11px] text-slate-400 pt-1">
-                Copy your Web app URL (ends with <code className="bg-slate-900 px-1 rounded text-cyan-300">/exec</code>) and paste it into the field above.
-              </p>
-            </div>
-          </div>
-        )}
       </div>
 
       {/* Header Bar */}
@@ -1172,7 +997,7 @@ export function SpreadsheetSources({ refreshKey }: Props) {
       ) : (
         <div className="space-y-4">
           {sources.map(src => (
-            <SourceCard key={src.source_id} source={src} onRefresh={fetchSources} onDelete={handleDeleteSource} />
+            <SourceCard key={src.source_id} source={src} onRefresh={fetchSources} />
           ))}
         </div>
       )}

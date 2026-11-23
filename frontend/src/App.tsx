@@ -50,21 +50,13 @@ export function App() {
       }
     };
 
-    const onSwitchTab = (e: any) => {
-      if (e && e.detail && typeof e.detail === 'string') {
-        setCurrentTab(e.detail);
-      }
-    };
-
     window.addEventListener('visibilitychange', onActive);
     window.addEventListener('focus', onActive);
-    window.addEventListener('switch-tab', onSwitchTab);
 
     return () => {
       clearInterval(interval);
       window.removeEventListener('visibilitychange', onActive);
       window.removeEventListener('focus', onActive);
-      window.removeEventListener('switch-tab', onSwitchTab);
     };
   }, []);
 
