@@ -32,6 +32,15 @@ const STORE_SOURCES = 'sources';
 const STORE_SNAPSHOTS = 'snapshots';
 const TOMBSTONE_STORAGE_KEY = 'stock_mgmt_deleted_sources';
 
+export function extractSpreadsheetId(urlOrId?: string | null): string {
+  if (!urlOrId || typeof urlOrId !== 'string') return '';
+  const trimmed = urlOrId.trim();
+  if (trimmed.startsWith('local_file:')) return trimmed;
+  const match = trimmed.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  if (match) return match[1];
+  return trimmed.split('/')[0].split('?')[0];
+}
+
 class PersistentStorage {
   private dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -87,7 +96,10 @@ class PersistentStorage {
     const set = this.getTombstones();
     for (const id of ids) {
       if (id && typeof id === 'string' && id.trim()) {
-        set.add(id.trim());
+        const trimmed = id.trim();
+        set.add(trimmed);
+        const clean = extractSpreadsheetId(trimmed);
+        if (clean) set.add(clean);
       }
     }
     try {
@@ -100,8 +112,11 @@ class PersistentStorage {
   removeTombstone(...ids: (string | undefined | null)[]): void {
     const set = this.getTombstones();
     for (const id of ids) {
-      if (id && typeof id === 'string') {
-        set.delete(id.trim());
+      if (id && typeof id === 'string' && id.trim()) {
+        const trimmed = id.trim();
+        set.delete(trimmed);
+        const clean = extractSpreadsheetId(trimmed);
+        if (clean) set.delete(clean);
       }
     }
     try {
@@ -114,8 +129,12 @@ class PersistentStorage {
   isTombstoned(...ids: (string | undefined | null)[]): boolean {
     const set = this.getTombstones();
     for (const id of ids) {
-      if (id && typeof id === 'string' && set.has(id.trim())) {
-        return true;
+      if (id && typeof id === 'string' && id.trim()) {
+        const trimmed = id.trim();
+        const clean = extractSpreadsheetId(trimmed);
+        if (set.has(trimmed) || (clean && set.has(clean))) {
+          return true;
+        }
       }
     }
     return false;

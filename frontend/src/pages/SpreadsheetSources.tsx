@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import { apiClient } from '../api/client';
 import { SpreadsheetSource, SheetInfo } from '../types';
-import { persistentStorage } from '../utils/persistentStorage';
+import { persistentStorage, extractSpreadsheetId } from '../utils/persistentStorage';
 
 const SERVICE_ACCOUNT_EMAIL = "stockmanagement@shining-courage-510614-a2.iam.gserviceaccount.com";
 
@@ -802,12 +802,46 @@ export function SpreadsheetSources({ refreshKey }: Props) {
       const res = await apiClient.getSources(true);
       const rawBackendSources = res.sources || [];
       // STRICT FILTER: NEVER allow any tombstoned / deleted source
-      const backendSources = rawBackendSources.filter(s => !persistentStorage.isTombstoned(s.source_id, s.spreadsheet_id));
+      let backendSources = rawBackendSources.filter(s => !persistentStorage.isTombstoned(s.source_id, s.spreadsheet_id));
 
-      // 3. Deduplicate sources sharing the exact same spreadsheet_id (keeping the populated / active one)
+      // 3. Cloud Self-Healing: Re-sync non-tombstoned Google Sheets across Render container restarts
+      let restoredCount = 0;
+      for (const local of localSources) {
+        if (local.source_type !== 'google_sheets') continue;
+        const cleanLocalId = extractSpreadsheetId(local.spreadsheet_url_or_id);
+        if (!cleanLocalId || persistentStorage.isTombstoned(local.id, cleanLocalId)) continue;
+
+        const existsOnBackend = backendSources.some(
+          b => extractSpreadsheetId(b.spreadsheet_id) === cleanLocalId
+        );
+
+        if (!existsOnBackend) {
+          try {
+            await apiClient.createSource({
+              name: local.name,
+              spreadsheet_url_or_id: cleanLocalId,
+              period: local.period || '',
+              description: local.description || '',
+              is_active: local.is_active || false,
+              poll_interval_seconds: local.poll_interval_seconds || 30
+            });
+            restoredCount++;
+          } catch (healErr) {
+            console.warn('Re-sync notice across Render restart:', cleanLocalId, healErr);
+          }
+        }
+      }
+
+      if (restoredCount > 0) {
+        const fresh = await apiClient.getSources(true);
+        backendSources = (fresh.sources || []).filter(s => !persistentStorage.isTombstoned(s.source_id, s.spreadsheet_id));
+      }
+
+      // 4. Clean Deduplication: Only merge sources sharing the EXACT SAME non-empty spreadsheet_id
       const seen = new Map<string, SpreadsheetSource>();
       for (const s of backendSources) {
-        const key = s.spreadsheet_id || s.source_id;
+        const cleanId = s.source_type === 'google_sheets' ? extractSpreadsheetId(s.spreadsheet_id) : s.spreadsheet_id;
+        const key = cleanId || s.source_id;
         if (!seen.has(key)) {
           seen.set(key, s);
         } else {

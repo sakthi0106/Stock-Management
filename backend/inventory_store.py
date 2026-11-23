@@ -87,6 +87,18 @@ class InventoryDataStore:
 
         for sheet_idx, (sheet_name, rows) in enumerate(raw_sheets.items()):
             if not rows:
+                new_worksheets.append({
+                    "id": sheet_idx + 1,
+                    "source_id": self.source_id,
+                    "sheet_name": sheet_name,
+                    "sheet_index": sheet_idx,
+                    "row_count": 0,
+                    "col_count": 0,
+                    "classification": "empty_sheet",
+                    "structure_type": "empty",
+                    "columns_count": 0,
+                    "issues": ["Worksheet has no data rows"]
+                })
                 continue
 
             headers, header_rows_consumed = UniversalParser.detect_header_rows(rows)

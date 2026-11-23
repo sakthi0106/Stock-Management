@@ -129,12 +129,12 @@ class SyncManager:
                 deduped = {}
                 for r in records:
                     sheet_id = r.get("spreadsheet_id", "")
-                    if sheet_id in deduped:
+                    if sheet_id and sheet_id in deduped:
                         prev = deduped[sheet_id]
                         if r.get("sheets_count", 0) > prev.get("sheets_count", 0) or r.get("items_count", 0) > prev.get("items_count", 0):
                             deduped[sheet_id] = r
                     else:
-                        deduped[sheet_id] = r
+                        deduped[sheet_id or r.get("source_id")] = r
                 records = list(deduped.values())
 
                 reader = UniversalSpreadsheetReader()
@@ -209,17 +209,20 @@ class SyncManager:
             except Exception as e:
                 logger.warning(f"Failed loading sources registry: {e}")
 
-        # Auto-register environment variable source if configured and no source with that ID exists
+        # Auto-register environment variable sources if configured
         if Config.GOOGLE_SHEETS_SPREADSHEET_ID:
-            clean_env_id = extract_spreadsheet_id(Config.GOOGLE_SHEETS_SPREADSHEET_ID)
-            if clean_env_id and clean_env_id not in self.deleted_source_ids and not any(s.spreadsheet_id == clean_env_id for s in self.sources.values()):
-                self.register_source(
-                    name="Google Sheet Live",
-                    spreadsheet_url_or_id=clean_env_id,
-                    source_type="google_sheets",
-                    is_active=True
-                )
-                logger.info(f"Auto-registered default Google Sheets source from environment: {clean_env_id}")
+            raw_ids = [s.strip() for s in Config.GOOGLE_SHEETS_SPREADSHEET_ID.split(',') if s.strip()]
+            for idx, raw_id in enumerate(raw_ids):
+                clean_env_id = extract_spreadsheet_id(raw_id)
+                if clean_env_id and clean_env_id not in self.deleted_source_ids and not any(s.spreadsheet_id == clean_env_id for s in self.sources.values()):
+                    default_name = f"Google Sheet {idx + 1}" if len(raw_ids) > 1 else "Google Sheet Live"
+                    self.register_source(
+                        name=default_name,
+                        spreadsheet_url_or_id=clean_env_id,
+                        source_type="google_sheets",
+                        is_active=False
+                    )
+                    logger.info(f"Auto-registered Google Sheets source from environment: {clean_env_id}")
 
     def register_source(
         self,
