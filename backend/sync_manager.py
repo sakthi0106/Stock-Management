@@ -72,7 +72,7 @@ class SyncManager:
 
     def _save_source_cache(self, store: InventoryDataStore):
         """Saves a single source's parsed inventory and worksheet data to an isolated JSON cache.
-        Using per-source files prevents large RAM allocations during serialization and protects Render's 512MB RAM ceiling.
+        Using per-source files prevents large RAM allocations during serialization and keeps memory usage optimal.
         """
         try:
             cache_path = self._get_cache_path(store.source_id)
@@ -490,7 +490,7 @@ class SyncManager:
 
         if store.source_type == "excel_upload":
             # An uploaded Excel workbook's data is already resident in memory/cache.
-            # Avoid re-reading large Excel files with openpyxl during sync to protect Render's 512MB RAM ceiling.
+            # Avoid re-reading large Excel files with openpyxl during sync when data is already resident.
             if not store.products:
                 clean_path = store.spreadsheet_id
                 if clean_path.startswith("local_file:"):

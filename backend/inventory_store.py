@@ -467,7 +467,7 @@ class InventoryDataStore:
 
         # Atomic swap
         self.products = new_products
-        # Cap movements to 1500 to prevent unbounded RAM growth on Render
+        # Cap movements to 1500 to maintain a fast, responsive memory profile
         self.movements = sorted(new_movements, key=lambda m: (m['date'], m['part_no']), reverse=True)[:1500]
         self.worksheets = new_worksheets
         self.dynamic_columns = new_dyn_cols

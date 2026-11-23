@@ -10,7 +10,7 @@ load_dotenv(root_dir / '.env')
 
 
 class Config:
-    PORT = int(os.environ.get('PORT', 5000))
+    PORT = int(os.environ.get('PORT', 8080))
     FLASK_ENV = os.environ.get('FLASK_ENV', 'production')
     DEBUG = os.environ.get('DEBUG', 'False').lower() in ('true', '1')
 

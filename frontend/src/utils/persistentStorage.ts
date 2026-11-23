@@ -3,7 +3,7 @@
  *
  * Uses browser IndexedDB with localStorage fallback to guarantee that:
  * 1. User-registered Google Sheets sources and uploaded Excel workbooks (.xlsx Blobs)
- *    are NEVER lost when Render hibernates, restarts, or recycles ephemeral containers.
+ *    are NEVER lost when cloud containers hibernate, restart, or scale.
  * 2. Data is permanently preserved until the user explicitly deletes the file/source.
  * 3. Deletion tombstones ensure deleted spreadsheets can NEVER resurrect on reload,
  *    reconnect, or self-healing reconciliation.

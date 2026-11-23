@@ -804,7 +804,7 @@ export function SpreadsheetSources({ refreshKey }: Props) {
       // STRICT FILTER: NEVER allow any tombstoned / deleted source
       let backendSources = rawBackendSources.filter(s => !persistentStorage.isTombstoned(s.source_id, s.spreadsheet_id));
 
-      // 3. Cloud Self-Healing: Re-sync non-tombstoned Google Sheets across Render container restarts
+      // 3. Cloud Self-Healing: Re-sync non-tombstoned Google Sheets across cloud container restarts
       let restoredCount = 0;
       for (const local of localSources) {
         if (local.source_type !== 'google_sheets') continue;
@@ -827,7 +827,7 @@ export function SpreadsheetSources({ refreshKey }: Props) {
             });
             restoredCount++;
           } catch (healErr) {
-            console.warn('Re-sync notice across Render restart:', cleanLocalId, healErr);
+            console.warn('Re-sync notice across container restart:', cleanLocalId, healErr);
           }
         }
       }

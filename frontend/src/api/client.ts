@@ -34,8 +34,8 @@ class ApiClient {
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const controller = new AbortController();
-      // 90-second timeout to allow sufficient window for Render free-tier cold boot
-      const timeoutId = setTimeout(() => controller.abort(), 90000);
+      // 60-second timeout to allow sufficient window for container initialization
+      const timeoutId = setTimeout(() => controller.abort(), 60000);
 
       try {
         const response = await fetch(url, {
@@ -49,7 +49,7 @@ class ApiClient {
         clearTimeout(timeoutId);
 
         if (!response.ok) {
-          // Retry transient Render proxy / gateway errors on 502, 503, 504
+          // Retry transient gateway errors on 502, 503, 504
           if ([502, 503, 504].includes(response.status) && attempt < maxAttempts && !options?.signal?.aborted) {
             await new Promise((r) => setTimeout(r, attempt * 2000));
             continue;
@@ -83,7 +83,7 @@ class ApiClient {
 
         if (isNetworkErr) {
           const netErr = new Error(
-            `Cannot reach backend (${API_BASE_URL}). If hosted on Render free tier, it may still be waking up or redeploying (takes ~30-60s) — retrying automatically. If this persists, verify VITE_API_BASE_URL in Vercel.`
+            `Cannot reach backend (${API_BASE_URL}). If hosted on Google Cloud Run, it may still be scaling up or deploying — retrying automatically. If this persists, verify VITE_API_BASE_URL in Vercel.`
           );
           console.error(`API network failure [${endpoint}]:`, error);
           throw netErr;
@@ -152,7 +152,7 @@ class ApiClient {
         });
         clearTimeout(timeoutId);
         if (!response.ok) {
-          // Retry on 502/503/504 while Render is warming up
+          // Retry on 502/503/504 while cloud container is warming up
           if ([502, 503, 504].includes(response.status) && attempt < 3) {
             await new Promise((r) => setTimeout(r, attempt * 2500));
             continue;
@@ -166,13 +166,13 @@ class ApiClient {
         const msg = String(err?.message || '');
         const isNetworkErr = err instanceof TypeError || /failed to fetch|networkerror|load failed/i.test(msg) || err?.name === 'AbortError';
         if (isNetworkErr && attempt < 3) {
-          // If server was cold-booting on Render free tier, wait 2.5s and retry
-          await new Promise((r) => setTimeout(r, attempt * 2500));
+          // If server was initializing, wait 2s and retry
+          await new Promise((r) => setTimeout(r, attempt * 2000));
           continue;
         }
         if (isNetworkErr) {
           throw new Error(
-            `Cannot reach backend (${API_BASE_URL}). If hosted on Render free tier, the server may be cold-booting or restarting. Please wait ~30 seconds and retry.`
+            `Cannot reach backend (${API_BASE_URL}). If hosted on Google Cloud Run, the container may be starting or updating. Please wait a few moments and retry.`
           );
         }
         throw err;
