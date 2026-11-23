@@ -448,6 +448,7 @@ const AddSourceModal: React.FC<AddModalProps> = ({ onClose, onAdded }) => {
 interface SourceCardProps {
   source: SpreadsheetSource;
   onRefresh: () => void;
+  onDelete?: (source: SpreadsheetSource) => void;
 }
 
 const statusBadge = (status: string) => {
@@ -463,7 +464,7 @@ const syncBadge = (s: string) => {
   return 'text-slate-400';
 };
 
-const SourceCard: React.FC<SourceCardProps> = ({ source, onRefresh }) => {
+const SourceCard: React.FC<SourceCardProps> = ({ source, onRefresh, onDelete }) => {
   const [expanded, setExpanded] = useState(false);
   const [sheets, setSheets] = useState<SheetInfo[]>([]);
   const [syncing, setSyncing] = useState(false);
@@ -527,9 +528,13 @@ const SourceCard: React.FC<SourceCardProps> = ({ source, onRefresh }) => {
     if (!confirm(msg)) return;
     setActionError('');
     try {
-      await apiClient.deleteSource(source.source_id).catch(() => {});
-      await persistentStorage.deleteSource(source.source_id);
-      onRefresh();
+      if (onDelete) {
+        onDelete(source);
+      } else {
+        await persistentStorage.deleteSource(source.source_id, source.spreadsheet_id);
+        await apiClient.deleteSource(source.source_id).catch(() => {});
+        onRefresh();
+      }
     } catch (e: any) {
       setActionError(e.message || 'Failed to delete');
     }
@@ -774,17 +779,23 @@ export function SpreadsheetSources({ refreshKey }: Props) {
       const localSources = await persistentStorage.getAllSources();
       const cachedSnapshot = await persistentStorage.getSnapshot<SpreadsheetSource[]>('sources_list');
       if (cachedSnapshot && cachedSnapshot.length > 0) {
-        setSources(cachedSnapshot);
+        const validCached = cachedSnapshot.filter(s => !persistentStorage.isTombstoned(s.source_id, s.spreadsheet_id));
+        setSources(validCached);
       }
 
       // 2. Fetch live sources from backend
       const res = await apiClient.getSources(true);
-      const backendSources = res.sources || [];
+      const rawBackendSources = res.sources || [];
+      // STRICT FILTER: NEVER allow any tombstoned / deleted source
+      const backendSources = rawBackendSources.filter(s => !persistentStorage.isTombstoned(s.source_id, s.spreadsheet_id));
 
-      // 3. Self-Healing Reconciliation: If Render restarted and lost ephemeral sources, restore them
+      // 3. Self-Healing Reconciliation: ONLY for non-tombstoned sources
       if (localSources.length > 0) {
         let restoredCount = 0;
         for (const local of localSources) {
+          if (persistentStorage.isTombstoned(local.id, local.spreadsheet_url_or_id)) {
+            continue;
+          }
           const existsOnBackend = backendSources.some(
             b => b.source_id === local.id || 
                  b.spreadsheet_id === local.spreadsheet_url_or_id || 
@@ -821,8 +832,9 @@ export function SpreadsheetSources({ refreshKey }: Props) {
 
         if (restoredCount > 0) {
           const fresh = await apiClient.getSources(true);
-          setSources(fresh.sources || []);
-          await persistentStorage.saveSnapshot('sources_list', fresh.sources || []);
+          const freshValid = (fresh.sources || []).filter(s => !persistentStorage.isTombstoned(s.source_id, s.spreadsheet_id));
+          setSources(freshValid);
+          await persistentStorage.saveSnapshot('sources_list', freshValid);
           return;
         }
       }
@@ -832,7 +844,7 @@ export function SpreadsheetSources({ refreshKey }: Props) {
 
       // Cache all live backend Google Sheets into persistent storage
       for (const s of backendSources) {
-        if (s.source_type === 'google_sheets') {
+        if (s.source_type === 'google_sheets' && !persistentStorage.isTombstoned(s.source_id, s.spreadsheet_id)) {
           persistentStorage.saveSource({
             id: s.source_id,
             name: s.name,
@@ -849,7 +861,8 @@ export function SpreadsheetSources({ refreshKey }: Props) {
     } catch (e: any) {
       const cached = await persistentStorage.getSnapshot<SpreadsheetSource[]>('sources_list');
       if (cached && cached.length > 0) {
-        setSources(cached);
+        const validCached = cached.filter(s => !persistentStorage.isTombstoned(s.source_id, s.spreadsheet_id));
+        setSources(validCached);
       } else {
         setError(e.message || 'Failed to load sources');
       }
@@ -857,6 +870,22 @@ export function SpreadsheetSources({ refreshKey }: Props) {
       setLoading(false);
     }
   }, []);
+
+  const handleDeleteSource = async (sourceToDelete: SpreadsheetSource) => {
+    // 1. Optimistic removal from state immediately
+    setSources(prev => prev.filter(
+      s => s.source_id !== sourceToDelete.source_id &&
+           s.spreadsheet_id !== sourceToDelete.spreadsheet_id
+    ));
+    // 2. Add to tombstones & delete from IndexedDB & snapshots
+    await persistentStorage.deleteSource(sourceToDelete.source_id, sourceToDelete.spreadsheet_id);
+    // 3. Best-effort notify backend API
+    await apiClient.deleteSource(sourceToDelete.source_id).catch(err => {
+      console.warn('Backend deletion notice:', err);
+    });
+    // 4. Reload
+    fetchSources();
+  };
 
   useEffect(() => {
     fetchSources();
@@ -997,7 +1026,7 @@ export function SpreadsheetSources({ refreshKey }: Props) {
       ) : (
         <div className="space-y-4">
           {sources.map(src => (
-            <SourceCard key={src.source_id} source={src} onRefresh={fetchSources} />
+            <SourceCard key={src.source_id} source={src} onRefresh={fetchSources} onDelete={handleDeleteSource} />
           ))}
         </div>
       )}

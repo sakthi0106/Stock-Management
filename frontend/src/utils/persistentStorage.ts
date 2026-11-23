@@ -5,7 +5,9 @@
  * 1. User-registered Google Sheets sources and uploaded Excel workbooks (.xlsx Blobs)
  *    are NEVER lost when Render hibernates, restarts, or recycles ephemeral containers.
  * 2. Data is permanently preserved until the user explicitly deletes the file/source.
- * 3. The frontend immediately displays cached data on mount, eliminating cold-boot blank screens.
+ * 3. Deletion tombstones ensure deleted spreadsheets can NEVER resurrect on reload,
+ *    reconnect, or self-healing reconciliation.
+ * 4. The frontend immediately displays cached data on mount, eliminating cold-boot blank screens.
  */
 
 export interface StoredSource {
@@ -28,6 +30,7 @@ const DB_NAME = 'StockManagementPersistentDB';
 const DB_VERSION = 1;
 const STORE_SOURCES = 'sources';
 const STORE_SNAPSHOTS = 'snapshots';
+const TOMBSTONE_STORAGE_KEY = 'stock_mgmt_deleted_sources';
 
 class PersistentStorage {
   private dbPromise: Promise<IDBDatabase> | null = null;
@@ -64,10 +67,68 @@ class PersistentStorage {
   }
 
   // -------------------------------------------------------------
+  // Deletion Tombstones (Prevents Deleted Spreadsheets from Returning)
+  // -------------------------------------------------------------
+
+  getTombstones(): Set<string> {
+    try {
+      const raw = localStorage.getItem(TOMBSTONE_STORAGE_KEY);
+      if (raw) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) return new Set(arr);
+      }
+    } catch {
+      // ignore
+    }
+    return new Set<string>();
+  }
+
+  addTombstone(...ids: (string | undefined | null)[]): void {
+    const set = this.getTombstones();
+    for (const id of ids) {
+      if (id && typeof id === 'string' && id.trim()) {
+        set.add(id.trim());
+      }
+    }
+    try {
+      localStorage.setItem(TOMBSTONE_STORAGE_KEY, JSON.stringify(Array.from(set)));
+    } catch {
+      // ignore
+    }
+  }
+
+  removeTombstone(...ids: (string | undefined | null)[]): void {
+    const set = this.getTombstones();
+    for (const id of ids) {
+      if (id && typeof id === 'string') {
+        set.delete(id.trim());
+      }
+    }
+    try {
+      localStorage.setItem(TOMBSTONE_STORAGE_KEY, JSON.stringify(Array.from(set)));
+    } catch {
+      // ignore
+    }
+  }
+
+  isTombstoned(...ids: (string | undefined | null)[]): boolean {
+    const set = this.getTombstones();
+    for (const id of ids) {
+      if (id && typeof id === 'string' && set.has(id.trim())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // -------------------------------------------------------------
   // Sources Management
   // -------------------------------------------------------------
 
   async saveSource(source: StoredSource): Promise<void> {
+    // If user explicitly saves or uploads, remove any previous tombstone
+    this.removeTombstone(source.id, source.spreadsheet_url_or_id);
+
     try {
       const db = await this.getDB();
       await new Promise<void>((resolve, reject) => {
@@ -92,9 +153,10 @@ class PersistentStorage {
   }
 
   async getAllSources(): Promise<StoredSource[]> {
+    let list: StoredSource[] = [];
     try {
       const db = await this.getDB();
-      return await new Promise<StoredSource[]>((resolve, reject) => {
+      list = await new Promise<StoredSource[]>((resolve, reject) => {
         const tx = db.transaction(STORE_SOURCES, 'readonly');
         const store = tx.objectStore(STORE_SOURCES);
         const req = store.getAll();
@@ -102,28 +164,66 @@ class PersistentStorage {
         req.onerror = () => reject(req.error);
       });
     } catch {
-      return this.getLocalStorageSources();
+      list = this.getLocalStorageSources();
     }
+
+    // Filter out any tombstoned sources
+    return list.filter(s => !this.isTombstoned(s.id, s.spreadsheet_url_or_id));
   }
 
-  async deleteSource(id: string): Promise<void> {
+  async deleteSource(id: string, spreadsheetId?: string): Promise<void> {
+    // 1. Permanently record in tombstones
+    this.addTombstone(id, spreadsheetId);
+
+    // 2. Delete from IndexedDB STORE_SOURCES
     try {
       const db = await this.getDB();
-      await new Promise<void>((resolve, reject) => {
-        const tx = db.transaction(STORE_SOURCES, 'readwrite');
-        const store = tx.objectStore(STORE_SOURCES);
-        const req = store.delete(id);
-        req.onsuccess = () => resolve();
-        req.onerror = () => reject(req.error);
+      const sources = await this.getAllSources();
+      const toDelete = sources.filter(
+        s => s.id === id || s.id === spreadsheetId ||
+             (spreadsheetId && s.spreadsheet_url_or_id === spreadsheetId) ||
+             s.spreadsheet_url_or_id === id
+      );
+
+      const tx = db.transaction(STORE_SOURCES, 'readwrite');
+      const store = tx.objectStore(STORE_SOURCES);
+      store.delete(id);
+      if (spreadsheetId) store.delete(spreadsheetId);
+      for (const td of toDelete) {
+        store.delete(td.id);
+      }
+      await new Promise<void>((resolve) => {
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
       });
     } catch {
       // ignore
     }
 
+    // 3. Delete from localStorage fallback
     try {
       const existing = this.getLocalStorageSources();
-      const filtered = existing.filter(s => s.id !== id);
+      const filtered = existing.filter(
+        s => s.id !== id && s.id !== spreadsheetId &&
+             s.spreadsheet_url_or_id !== id &&
+             (!spreadsheetId || s.spreadsheet_url_or_id !== spreadsheetId)
+      );
       localStorage.setItem('stock_mgmt_stored_sources', JSON.stringify(filtered));
+    } catch {
+      // ignore
+    }
+
+    // 4. Clean snapshot 'sources_list' immediately so stale cache never displays it
+    try {
+      const cached = await this.getSnapshot<any[]>('sources_list');
+      if (Array.isArray(cached)) {
+        const cleaned = cached.filter(
+          s => s.source_id !== id && s.source_id !== spreadsheetId &&
+               s.spreadsheet_id !== id &&
+               (!spreadsheetId || s.spreadsheet_id !== spreadsheetId)
+        );
+        await this.saveSnapshot('sources_list', cleaned);
+      }
     } catch {
       // ignore
     }
@@ -162,9 +262,10 @@ class PersistentStorage {
   }
 
   async getSnapshot<T>(key: string): Promise<T | null> {
+    let result: T | null = null;
     try {
       const db = await this.getDB();
-      return await new Promise<T | null>((resolve, reject) => {
+      result = await new Promise<T | null>((resolve, reject) => {
         const tx = db.transaction(STORE_SNAPSHOTS, 'readonly');
         const store = tx.objectStore(STORE_SNAPSHOTS);
         const req = store.get(key);
@@ -174,11 +275,20 @@ class PersistentStorage {
     } catch {
       try {
         const raw = localStorage.getItem(`stock_mgmt_snapshot_${key}`);
-        return raw ? JSON.parse(raw) : null;
+        result = raw ? JSON.parse(raw) : null;
       } catch {
-        return null;
+        result = null;
       }
     }
+
+    // If reading sources_list snapshot, make sure tombstoned sources are excluded
+    if (key === 'sources_list' && Array.isArray(result)) {
+      result = (result as any[]).filter(
+        (s: any) => !this.isTombstoned(s.source_id, s.spreadsheet_id)
+      ) as unknown as T;
+    }
+
+    return result;
   }
 }
 
